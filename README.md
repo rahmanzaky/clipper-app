@@ -1,20 +1,28 @@
-# Auto Video Clipper — MVP
+# Auto Video Clipper — Phase 2
 
 Paste a YouTube URL, get compliance-checked vertical clips out. Built for competing
 in paid clipping campaigns (Whop/Evangelist-style — e.g. Lovable Clipping).
 
-## What this MVP does (Phase 1 of the full plan)
+## What it does
 
 1. Downloads the source video (`yt-dlp`)
 2. Transcribes it bilingually, EN/ID, with word-level timestamps (`faster-whisper`,
    large-v3-turbo model)
-3. Finds candidate clips two ways:
+3. Finds candidate clips two ways, ranked best-first by relevance score:
    - If `GROQ_API_KEY` is set: asks Groq's free-tier LLM which segments discuss your
-     topic (better recall, catches paraphrases)
-   - Otherwise: falls back to plain keyword matching (zero setup, always works)
-4. Cuts each candidate, center-crops to 9:16, burns in captions, exports to `output/`
+     topic (0-10 relevance score each) — catches paraphrases keyword matching misses
+     (verified: correctly flagged a segment referencing a topic indirectly, with no
+     literal keyword present, that keyword matching completely missed)
+   - Otherwise: falls back to plain keyword matching (zero setup, always works),
+     scored by keyword-hit density
+4. Cuts each candidate, **face-tracks the crop to 9:16** (OpenCV Haar cascade —
+   centers on the detected speaker's face, falls back to a plain center-crop if no
+   face is found in the sampled frames), burns in **word-level karaoke-style
+   captions** (ASS format, CapCut-style highlight sweep), exports to `output/`
 5. Checks each clip against your campaign's rules (min/max duration, required
    hashtag) and reports pass/fail before you submit anywhere
+6. **Campaign profiles** — save a named set of topic/duration/hashtag rules once,
+   reload it by name on future runs instead of re-typing flags
 
 ## Setup
 
@@ -36,14 +44,22 @@ brew install ffmpeg-full
 `clipper.py` automatically looks for it at `/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg`
 first and falls back to whatever `ffmpeg` is on PATH otherwise.
 
-Optional — for better topic-relevance detection, get a free Groq API key at
-console.groq.com and export it:
+**Face detection** uses OpenCV's Haar cascade (not MediaPipe — MediaPipe 1.0.1's
+package import chain pulls in matplotlib, whose font manager crashes on this
+machine's macOS version; OpenCV avoids that entirely). The model file
+(`backend/models/haarcascade_frontalface_default.xml`) is checked into the repo, no
+extra download needed.
 
-```bash
-export GROQ_API_KEY="your-key-here"
+**Groq API key** (optional but recommended) — get a free one at console.groq.com and
+put it in a `.env` file at the project root (never committed — already in
+`.gitignore`):
+
+```
+GROQ_API_KEY=your-key-here
 ```
 
-Without it, the tool still works using keyword matching instead.
+`main.py` loads this automatically via `python-dotenv`. Without a key, the tool still
+works using keyword matching instead — weaker recall on paraphrases, but zero setup.
 
 The first run downloads the Whisper model weights from Hugging Face (one-time,
 ~150MB for `small`, ~1.5GB for `large-v3-turbo`). If your connection is flaky and
@@ -72,17 +88,62 @@ python main.py --url "https://youtube.com/watch?v=..." \
   --hashtag "#LovablePartner"
 ```
 
-Clips land in `output/`, named `<video_id>_clip1.mp4`, `_clip2.mp4`, etc.
+Clips land in `output/`, named `<video_id>_clip1.mp4`, `_clip2.mp4`, etc., ranked
+best-first by relevance score.
 
-## What's simplified vs. the full plan (for now)
+### Campaign profiles
 
-- **Crop is a simple center-crop**, not the face-tracked MediaPipe crop from the full
-  plan. Good enough to validate the pipeline; face-tracking is the next upgrade.
-- **Captions are plain burned-in text**, not word-by-word karaoke-style highlighting.
-- **No campaign-profile save/reuse UI yet** — pass campaign rules as CLI flags each run.
-- **No React frontend yet** — this is a CLI tool for now, to get the core AI pipeline
-  proven before building UI on top of it.
+Save a campaign's rules once:
 
-These are exactly the "Phase 2+" items from the plan (`~/.claude/plans/im-thinking-to-
-bump-fluttering-eagle.md`) — the MVP goal was proving the mechanical pipeline
-(download → transcribe → detect → cut → caption → validate) works end to end first.
+```bash
+python main.py --url "..." --topic "Lovable" --topic "Anton" \
+  --min-duration 15 --max-duration 60 --hashtag "#LovablePartner" \
+  --save-profile lovable
+```
+
+Then reuse it on future runs without re-typing the flags:
+
+```bash
+python main.py --url "https://youtube.com/watch?v=DIFFERENT_VIDEO" --profile lovable
+```
+
+Profiles are stored in `campaigns.json` at the project root (gitignored — it's your
+personal campaign list, not committed).
+
+## Known limitations
+
+- **Per-segment language tagging is a whole-file approximation.** faster-whisper
+  detects one language for the entire audio file, not per segment — for genuinely
+  code-switched EN/ID content, the reported `language` on each segment is the
+  whole-file majority language, not a true per-segment detection. Transcription
+  *accuracy* on code-switched speech is still strong (verified against a real
+  bilingual test clip: correctly transcribed pure Indonesian, a code-switched
+  EN→ID sentence, and a mostly-English sentence, all in one file) — only the
+  per-segment *language label* is approximate.
+- **Face tracking is single-face-oriented.** Picks the largest detected face per
+  sampled frame; with two speakers side by side it doesn't yet pick "whichever one
+  is currently talking," just the more prominent face. Falls back to center-crop
+  cleanly if no face is found at all.
+- **No React frontend yet** — this is a CLI tool for now.
+
+## Verification performed
+
+Every feature above was tested with real execution, not just written and assumed to
+work — this caught several real bugs along the way (an ffmpeg filter syntax issue, a
+missing libass dependency, Hugging Face's Xet backend failing on an unstable network
+connection, a retired Groq model name, and a MediaPipe/matplotlib/macOS
+incompatibility that led to switching to OpenCV for face detection):
+
+- Face-tracked crop: computed crop offset confirmed different from plain-center
+  (100px vs 92px on a test frame) and visually confirmed centered on the actual face
+- Karaoke captions: visually confirmed the highlight sweeps word-by-word in sync
+  with speech across three extracted frames
+- Groq vs. keyword quality: real side-by-side test where Groq caught a paraphrased
+  topic reference keyword matching missed entirely
+- Campaign profiles: saved a profile, loaded it in a separate run, confirmed
+  identical results
+- Bilingual transcription: real synthetic EN/ID speech (macOS `say -v Damayanti`)
+  transcribed correctly across a pure-Indonesian sentence, a code-switched sentence,
+  and a mostly-English sentence
+- Full regression: re-ran the original Phase 1 test video after all Phase 2 changes,
+  confirmed no breakage

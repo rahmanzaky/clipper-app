@@ -35,11 +35,16 @@ class Segment:
 
 def transcribe(audio_path: str) -> list:
     model = _get_model()
-    segments, _info = model.transcribe(
+    segments, info = model.transcribe(
         audio_path,
         word_timestamps=True,
         vad_filter=True,
     )
+    # Known limitation: faster-whisper detects language once for the whole file
+    # (info.language), not per segment — it has no built-in per-segment language ID.
+    # For genuinely code-switched audio (like the bilingual test clip), this whole-file
+    # label is an approximation, not a per-segment ground truth.
+    detected_language = info.language
     result = []
     for seg in segments:
         words = [Word(w.word.strip(), w.start, w.end) for w in (seg.words or [])]
@@ -48,7 +53,7 @@ def transcribe(audio_path: str) -> list:
                 text=seg.text.strip(),
                 start=seg.start,
                 end=seg.end,
-                language=seg.language if hasattr(seg, "language") else "",
+                language=detected_language,
                 words=words,
             )
         )

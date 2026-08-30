@@ -8,11 +8,15 @@ import argparse
 import os
 import sys
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
 from downloader import download_video
 from transcriber import transcribe
 from detector import detect_highlights
 from clipper import make_clip
 from compliance import CampaignProfile, check_clip
+from profiles import load_profile, save_profile
 
 WORK_DIR = os.path.join(os.path.dirname(__file__), "..", "work")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "output")
@@ -26,13 +30,35 @@ def main():
     parser.add_argument("--min-duration", type=float, default=8.0)
     parser.add_argument("--max-duration", type=float, default=60.0)
     parser.add_argument("--hashtag", default="", help="Required hashtag to check for")
+    parser.add_argument("--profile", default=None,
+                         help="Load a saved campaign profile by name (from campaigns.json)")
+    parser.add_argument("--save-profile", default=None,
+                         help="Save the given --topic/--hashtag/--min-duration/--max-duration flags under this name")
     args = parser.parse_args()
 
+    if args.profile:
+        saved = load_profile(args.profile)
+        topics = saved["topics"]
+        min_duration = saved["min_duration"]
+        max_duration = saved["max_duration"]
+        hashtag = saved["hashtag"]
+        print(f"[profile] Loaded '{args.profile}': topics={topics}, "
+              f"duration={min_duration}-{max_duration}s, hashtag={hashtag or '(none)'}")
+    else:
+        topics = args.topic
+        min_duration = args.min_duration
+        max_duration = args.max_duration
+        hashtag = args.hashtag
+
+    if args.save_profile:
+        save_profile(args.save_profile, topics, min_duration, max_duration, hashtag)
+        print(f"[profile] Saved current settings as '{args.save_profile}'")
+
     profile = CampaignProfile(
-        topics=args.topic,
-        min_duration=args.min_duration,
-        max_duration=args.max_duration,
-        required_hashtag=args.hashtag,
+        topics=topics,
+        min_duration=min_duration,
+        max_duration=max_duration,
+        required_hashtag=hashtag,
     )
 
     print(f"[1/4] Downloading: {args.url}")
@@ -43,9 +69,9 @@ def main():
     segments = transcribe(video_path)
     print(f"      -> {len(segments)} segments")
 
-    print(f"[3/4] Detecting highlights (topics: {args.topic or 'general'})...")
-    candidates = detect_highlights(segments, args.topic)
-    print(f"      -> {len(candidates)} candidate clips found")
+    print(f"[3/4] Detecting highlights (topics: {topics or 'general'})...")
+    candidates = detect_highlights(segments, topics)
+    print(f"      -> {len(candidates)} candidate clips found, ranked best-first")
 
     if not candidates:
         print("No candidate clips found. Try different --topic keywords or check the transcript.")
@@ -60,7 +86,7 @@ def main():
         make_clip(video_path, cand.start, cand.end, all_words, out_path)
         result = check_clip(cand.start, cand.end, cand.text, profile)
         status = "PASS" if result.passed else "FAIL"
-        print(f"\n  Clip {i+1}: {cand.start:.1f}s - {cand.end:.1f}s ({cand.reason})")
+        print(f"\n  Clip {i+1} [score {cand.score:.1f}]: {cand.start:.1f}s - {cand.end:.1f}s ({cand.reason})")
         print(f"    -> {out_path}")
         print(f"    Compliance: {status}")
         for issue in result.issues:
