@@ -110,7 +110,14 @@ python main.py --url "https://youtube.com/watch?v=DIFFERENT_VIDEO" --profile lov
 Profiles are stored in `campaigns.json` at the project root (gitignored — it's your
 personal campaign list, not committed).
 
-## ⚠️ Real speed benchmark result — the 10-minute window is not currently met
+## Real speed benchmark result — processing is slow on long content (not a compliance issue)
+
+**Note on campaign timing:** the Lovable-style "submit within 10 minutes" rule is
+about the gap between *posting a clip* and *submitting its URL* to the campaign
+platform for view-tracking — it has nothing to do with how long clip production
+takes. Nothing below is "failing to meet" that rule. Speed still matters for two
+real reasons: more clips produced per hour directly affects pay-per-view earnings,
+and nobody wants to sit around waiting unnecessarily long per video.
 
 Tested against a real ~16.4-minute podcast (not a toy clip), using the `small`
 Whisper model (the default `large-v3-turbo`'s ~1.5GB download was impractically slow
@@ -123,9 +130,10 @@ faster):
 | Groq detection (328 segments, 9 batches) | 48-137s, highly variable | rate-limit-bound, not compute-bound |
 
 **Extrapolated to a real 30-60 minute campaign podcast**, transcription alone would
-take roughly **16-32 minutes** with the `small` model — already past the 10-minute
-submission window before detection, cropping, or captioning even start. The actual
-default model (`large-v3-turbo`) is larger and would be slower still.
+take roughly **16-32 minutes** with the `small` model. The actual default model
+(`large-v3-turbo`) is larger and would be slower still. That's a real amount of time
+to wait per source video, and worth improving for throughput — just not a rule
+violation.
 
 **A second, separate real bug this benchmark uncovered and fixed:** the original
 `detect_groq()` sent an entire transcript as one prompt. On this real 328-segment
@@ -137,13 +145,13 @@ retry-then-skip (one failed batch no longer sinks the whole transcript's detecti
 transcript this size; expect multiple 429-triggered retries in practice, not just in
 theory.
 
-**What this means practically right now:** don't rely on this tool to reliably beat
-a 10-minute submission window on real 30-60 minute source content yet. Honest options
+**What this means practically right now:** processing a real 30-60 minute podcast
+takes a real amount of time (tens of minutes), which is worth improving for
+throughput/earnings even though it isn't blocking any campaign rule. Honest options
 going forward, not yet decided or implemented:
 - A faster transcription path (GPU/MLX-accelerated Whisper instead of CPU int8,
   or a smaller model as the real default rather than just a testing fallback)
-- A paid Groq tier (removes the rate-limit bottleneck) or spacing detection out
-  so it doesn't have to happen inside the submission window at all
+- A paid Groq tier (removes the rate-limit bottleneck)
 - Parallelizing what can be parallelized (transcription is inherently sequential
   per audio stream, but cut/crop/caption across multiple candidate clips currently
   runs one at a time and could run concurrently)
