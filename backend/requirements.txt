@@ -4,3 +4,4 @@ ffmpeg-python
 opencv-python-headless
 requests
 python-dotenv
+pytest

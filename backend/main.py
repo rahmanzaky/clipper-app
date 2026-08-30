@@ -61,17 +61,29 @@ def main():
         required_hashtag=hashtag,
     )
 
-    print(f"[1/4] Downloading: {args.url}")
-    video_path = download_video(args.url, WORK_DIR)
-    print(f"      -> {video_path}")
+    try:
+        print(f"[1/4] Downloading: {args.url}")
+        video_path = download_video(args.url, WORK_DIR)
+        print(f"      -> {video_path}")
+    except Exception as e:
+        print(f"\n[FAILED at download] {e}")
+        sys.exit(1)
 
-    print("[2/4] Transcribing (bilingual EN/ID, this may take a while)...")
-    segments = transcribe(video_path)
-    print(f"      -> {len(segments)} segments")
+    try:
+        print("[2/4] Transcribing (bilingual EN/ID, this may take a while)...")
+        segments = transcribe(video_path)
+        print(f"      -> {len(segments)} segments")
+    except Exception as e:
+        print(f"\n[FAILED at transcription] {e}")
+        sys.exit(1)
 
-    print(f"[3/4] Detecting highlights (topics: {topics or 'general'})...")
-    candidates = detect_highlights(segments, topics)
-    print(f"      -> {len(candidates)} candidate clips found, ranked best-first")
+    try:
+        print(f"[3/4] Detecting highlights (topics: {topics or 'general'})...")
+        candidates = detect_highlights(segments, topics)
+        print(f"      -> {len(candidates)} candidate clips found, ranked best-first")
+    except Exception as e:
+        print(f"\n[FAILED at highlight detection] {e}")
+        sys.exit(1)
 
     if not candidates:
         print("No candidate clips found. Try different --topic keywords or check the transcript.")
@@ -83,7 +95,11 @@ def main():
     base = os.path.splitext(os.path.basename(video_path))[0]
     for i, cand in enumerate(candidates):
         out_path = os.path.join(OUTPUT_DIR, f"{base}_clip{i+1}.mp4")
-        make_clip(video_path, cand.start, cand.end, all_words, out_path)
+        try:
+            make_clip(video_path, cand.start, cand.end, all_words, out_path)
+        except Exception as e:
+            print(f"\n  Clip {i+1}: [FAILED to cut/crop/caption] {e} — skipping this clip, continuing with the rest")
+            continue
         result = check_clip(cand.start, cand.end, cand.text, profile)
         status = "PASS" if result.passed else "FAIL"
         print(f"\n  Clip {i+1} [score {cand.score:.1f}]: {cand.start:.1f}s - {cand.end:.1f}s ({cand.reason})")

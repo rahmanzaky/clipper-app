@@ -12,8 +12,19 @@ DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
 def _get_model() -> WhisperModel:
     global _MODEL
     if _MODEL is None:
-        # CPU int8 for Mac compatibility without CUDA.
-        _MODEL = WhisperModel(DEFAULT_MODEL, device="cpu", compute_type="int8")
+        try:
+            # CPU int8 for Mac compatibility without CUDA.
+            _MODEL = WhisperModel(DEFAULT_MODEL, device="cpu", compute_type="int8")
+        except Exception as e:
+            # huggingface_hub already retries transient failures internally: if it
+            # still failed, this is usually a genuinely broken/unstable connection —
+            # point at the documented workaround instead of a raw traceback.
+            raise RuntimeError(
+                f"Failed to load/download Whisper model '{DEFAULT_MODEL}': {e}\n"
+                f"If this looks like a download error (e.g. 'CAS Client Error'), try:\n"
+                f"  export HF_HUB_DISABLE_XET=1\n"
+                f"and re-run. See README.md for details."
+            ) from e
     return _MODEL
 
 

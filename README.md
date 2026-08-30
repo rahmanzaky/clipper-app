@@ -1,4 +1,4 @@
-# Auto Video Clipper — Phase 2
+# Auto Video Clipper — Phase 3
 
 Paste a YouTube URL, get compliance-checked vertical clips out. Built for competing
 in paid clipping campaigns (Whop/Evangelist-style — e.g. Lovable Clipping).
@@ -110,6 +110,47 @@ python main.py --url "https://youtube.com/watch?v=DIFFERENT_VIDEO" --profile lov
 Profiles are stored in `campaigns.json` at the project root (gitignored — it's your
 personal campaign list, not committed).
 
+## ⚠️ Real speed benchmark result — the 10-minute window is not currently met
+
+Tested against a real ~16.4-minute podcast (not a toy clip), using the `small`
+Whisper model (the default `large-v3-turbo`'s ~1.5GB download was impractically slow
+on this network — actual production use would be *slower* than these numbers, not
+faster):
+
+| Stage | Real measured time | Real-time factor |
+|---|---|---|
+| Transcription | ~460-525s for 16.4 min of audio | ~1.9x realtime |
+| Groq detection (328 segments, 9 batches) | 48-137s, highly variable | rate-limit-bound, not compute-bound |
+
+**Extrapolated to a real 30-60 minute campaign podcast**, transcription alone would
+take roughly **16-32 minutes** with the `small` model — already past the 10-minute
+submission window before detection, cropping, or captioning even start. The actual
+default model (`large-v3-turbo`) is larger and would be slower still.
+
+**A second, separate real bug this benchmark uncovered and fixed:** the original
+`detect_groq()` sent an entire transcript as one prompt. On this real 328-segment
+transcript that failed outright (empty/invalid LLM response), and retrying hit
+Groq's free-tier rate limit (429) immediately after. Fixed by batching (`BATCH_SIZE`
+in `detector.py`, 25 segments/call) with inter-batch pacing and per-batch
+retry-then-skip (one failed batch no longer sinks the whole transcript's detection)
+— but **Groq's free-tier rate limit is still a real, observed bottleneck** on a
+transcript this size; expect multiple 429-triggered retries in practice, not just in
+theory.
+
+**What this means practically right now:** don't rely on this tool to reliably beat
+a 10-minute submission window on real 30-60 minute source content yet. Honest options
+going forward, not yet decided or implemented:
+- A faster transcription path (GPU/MLX-accelerated Whisper instead of CPU int8,
+  or a smaller model as the real default rather than just a testing fallback)
+- A paid Groq tier (removes the rate-limit bottleneck) or spacing detection out
+  so it doesn't have to happen inside the submission window at all
+- Parallelizing what can be parallelized (transcription is inherently sequential
+  per audio stream, but cut/crop/caption across multiple candidate clips currently
+  runs one at a time and could run concurrently)
+
+This is exactly the kind of gap that only showed up by testing against real-length
+content instead of short clips — flagged here rather than glossed over.
+
 ## Known limitations
 
 - **Per-segment language tagging is a whole-file approximation.** faster-whisper
@@ -125,6 +166,32 @@ personal campaign list, not committed).
   is currently talking," just the more prominent face. Falls back to center-crop
   cleanly if no face is found at all.
 - **No React frontend yet** — this is a CLI tool for now.
+
+## Testing
+
+```bash
+cd backend
+source ../venv/bin/activate
+pytest tests/ -v
+```
+
+29 tests, pure logic only (no network/model calls), runs in well under a second.
+Covers `detector.py`'s merge/scoring/ranking logic (including a real bug this suite
+caught on first run: keyword scoring counted *whether* a topic appeared, not *how
+many times* — "Lovable Lovable Lovable" scored the same as one mention, now fixed),
+`compliance.py`'s pass/fail rules, `captions.py`'s ASS timestamp math, and
+`face_crop.py`'s crop-clamping boundary logic.
+
+## Error handling
+
+`downloader.py` and `detector.py`'s Groq path both retry transient failures with
+exponential backoff (`retry.py`) before giving up — verified for real by forcing an
+invalid Groq key (confirmed 3 retry attempts, then a clean fallback to keyword
+matching) and an invalid video URL (confirmed 3 retries, then a clear error message
+instead of a raw traceback). `main.py` wraps each pipeline stage so a failure prints
+an actionable `[FAILED at <stage>]` message; a single clip's cut/crop/caption failure
+skips that clip and continues with the rest of the batch rather than aborting
+everything.
 
 ## Verification performed
 
