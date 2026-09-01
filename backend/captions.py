@@ -1,9 +1,5 @@
-"""Word-level karaoke-style burned captions (ASS format via libass).
-
-Each caption line covers a short chunk of words. Within a line, every word carries
-an ASS `\\kf` (karaoke fill) tag whose duration is that word's own timing — libass
-sweeps the highlight color across each word as it's spoken, the CapCut-style look
-real competitors use, instead of the whole chunk lighting up at once.
+"""Plain, elegant burned-in captions (ASS format via libass) — static per-line
+subtitle text, movie-subtitle style, no per-word highlight animation.
 """
 
 _HEADER = """[Script Info]
@@ -13,7 +9,7 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Karaoke,Arial,64,&H00FFFFFF,&H0000FFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,3,3,0,2,60,60,120,1
+Style: Subtitle,Arial,58,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,60,60,120,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -30,35 +26,38 @@ def _ass_timestamp(seconds: float) -> str:
     return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def build_ass_karaoke(words, clip_start: float, chunk_size: int = 5) -> str:
-    """Build an ASS subtitle document with per-word karaoke-fill highlighting."""
-    lines = [_HEADER]
+def get_caption_lines(words, clip_start: float, chunk_size: int = 5) -> list:
+    """Group words into short caption lines relative to the clip's own start time.
+    Returns a list of {"text", "start", "end"} dicts — decoupled from raw ASR word
+    objects so callers (the caption editor, either ASS builder) can consume/produce
+    plain data instead of re-deriving from `words` every time.
+    """
+    lines = []
     for i in range(0, len(words), chunk_size):
         chunk = words[i:i + chunk_size]
         if not chunk:
             continue
+        text = " ".join(w.text.strip() for w in chunk if w.text.strip())
+        if not text:
+            continue
         line_start = max(0.0, chunk[0].start - clip_start)
         line_end = max(line_start + 0.2, chunk[-1].end - clip_start)
+        lines.append({"text": text, "start": line_start, "end": line_end})
+    return lines
 
-        # Build \kf tags: each word's on-screen highlight duration, in centiseconds,
-        # relative to the previous word's end (libass advances the fill per tag).
-        karaoke_text = ""
-        prev_end = line_start
-        for w in chunk:
-            w_start = max(prev_end, w.start - clip_start)
-            w_end = max(w_start + 0.05, w.end - clip_start)
-            duration_cs = int(round((w_end - w_start) * 100))
-            text = w.text.strip().replace("{", "").replace("}", "")
-            if not text:
-                continue
-            karaoke_text += f"{{\\kf{duration_cs}}}{text} "
-            prev_end = w_end
 
-        if not karaoke_text.strip():
+def build_ass_plain(lines) -> str:
+    """Build a static ASS subtitle document from caption line dicts ({"text",
+    "start", "end"}, clip-relative seconds) — one flat Dialogue line per chunk, no
+    per-word animation, styled like a movie subtitle (bottom-center, clean outline).
+    """
+    out = [_HEADER]
+    for line in lines:
+        text = line["text"].strip().replace("{", "").replace("}", "")
+        if not text:
             continue
-
-        lines.append(
-            f"Dialogue: 0,{_ass_timestamp(line_start)},{_ass_timestamp(line_end)},"
-            f"Karaoke,,0,0,0,,{karaoke_text.strip()}"
+        out.append(
+            f"Dialogue: 0,{_ass_timestamp(line['start'])},{_ass_timestamp(line['end'])},"
+            f"Subtitle,,0,0,0,,{text}"
         )
-    return "\n".join(lines) + "\n"
+    return "\n".join(out) + "\n"

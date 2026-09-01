@@ -44,3 +44,33 @@ def test_crop_x_never_negative_or_out_of_bounds_across_range():
         with patch.object(face_crop, "find_face_center_x", return_value=float(face_x)):
             crop_x = face_crop.compute_crop_x("fake.mp4", 0.0, 5.0, source_width=640, target_width=200)
         assert 0 <= crop_x <= 640 - 200
+
+
+def test_manual_center_x_overrides_face_detection():
+    """A manual override (0.0-1.0 fraction) should be used directly, skipping
+    find_face_center_x entirely — this is what the UI's crop-reposition slider drives.
+    """
+    with patch.object(face_crop, "find_face_center_x", return_value=200.0) as mock_find:
+        # manual fraction 0.5 of a 640-wide frame -> center_x = 320 -> crop_x = 220
+        crop_x = face_crop.compute_crop_x(
+            "fake.mp4", 0.0, 5.0, source_width=640, target_width=200, manual_center_x=0.5
+        )
+    assert crop_x == 220
+    mock_find.assert_not_called()
+
+
+def test_largest_cluster_mean_picks_dominant_face_not_average():
+    """The real bug this fixes: two distinct speakers' x-centers should NOT be
+    averaged into the empty gap between them — the more-consistently-detected one
+    (larger cluster) should win instead.
+    """
+    # Speaker A around x=100 (3 samples), speaker B around x=500 (2 samples).
+    centers = [95.0, 100.0, 105.0, 495.0, 505.0]
+    result = face_crop._largest_cluster_mean(centers, frame_width=640)
+    assert 90 <= result <= 110  # picks speaker A's cluster, not the ~300 midpoint
+
+
+def test_largest_cluster_mean_single_cluster_behaves_like_average():
+    centers = [198.0, 200.0, 202.0]
+    result = face_crop._largest_cluster_mean(centers, frame_width=640)
+    assert result == 200.0

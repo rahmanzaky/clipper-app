@@ -5,3 +5,6 @@ opencv-python-headless
 requests
 python-dotenv
 pytest
+python-multipart
+fastapi
+uvicorn

@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 
 from face_crop import compute_crop_x
-from captions import build_ass_karaoke
+from captions import build_ass_plain, get_caption_lines
 
 # ffmpeg-full (built with libass, for burned-in subtitles) is keg-only on Homebrew;
 # prefer it if present, otherwise fall back to whatever "ffmpeg" is on PATH.
@@ -29,19 +29,29 @@ def get_video_dimensions(path: str) -> tuple:
     return int(w), int(h)
 
 
-def make_clip(source_path: str, start: float, end: float, words, output_path: str) -> str:
+def make_clip(source_path: str, start: float, end: float, words, output_path: str,
+              crop_center_frac: float = None, caption_lines: list = None) -> dict:
+    """Cut/crop/caption a clip. Returns {"path", "crop_center_frac", "caption_lines"}
+    reflecting what was actually used — either the caller's manual override, or the
+    auto-detected face position / auto-derived caption lines, so the caller (api.py)
+    can persist these for later re-render (reposition/caption-edit endpoints).
+    """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     width, height = get_video_dimensions(source_path)
 
-    # Face-tracked crop to 9:16 (falls back to center-crop if no face found),
-    # then scale to 1080x1920.
+    # Face-tracked crop to 9:16 (falls back to center-crop if no face found, or to
+    # a manual override if the caller supplied one), then scale to 1080x1920.
     target_w = int(height * 9 / 16)
-    crop_x = compute_crop_x(source_path, start, end, width, target_w)
+    crop_x = compute_crop_x(source_path, start, end, width, target_w, manual_center_x=crop_center_frac)
+    used_crop_frac = crop_center_frac if crop_center_frac is not None else (crop_x + target_w / 2) / width
     crop_filter = f"crop={target_w}:{height}:{crop_x}:0,scale=1080:1920"
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".ass", delete=False) as f:
+    if caption_lines is None:
         clip_words = [w for w in words if w.start >= start and w.end <= end + 0.5]
-        f.write(build_ass_karaoke(clip_words, start))
+        caption_lines = get_caption_lines(clip_words, start)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".ass", delete=False) as f:
+        f.write(build_ass_plain(caption_lines))
         ass_path = f.name
 
     try:
@@ -59,4 +69,4 @@ def make_clip(source_path: str, start: float, end: float, words, output_path: st
     finally:
         os.unlink(ass_path)
 
-    return output_path
+    return {"path": output_path, "crop_center_frac": used_crop_frac, "caption_lines": caption_lines}

@@ -58,18 +58,26 @@ def _merge_segments(segments, hit_scores: dict, pad_before=2.0, pad_after=2.0):
     return candidates
 
 
+def _keyword_hit_score(segment, topics_lower: list) -> float:
+    """Score = total keyword occurrence count in the segment (hit density proxy) —
+    counts repeats of each topic, not just whether it's present at all. Factored out
+    of detect_keyword so incremental/streaming scoring (one new segment at a time,
+    used by the web API to show highlight markers while transcription is still
+    running) can reuse the exact same scoring rule instead of duplicating it.
+    """
+    text_lower = segment.text.lower()
+    return float(sum(text_lower.count(t) for t in topics_lower))
+
+
 def detect_keyword(segments, topics: list) -> list:
     topics_lower = [t.lower() for t in topics if t.strip()]
     if not topics_lower:
         return []
-    # Score = total keyword occurrence count in the segment (hit density proxy) —
-    # counts repeats of each topic, not just whether it's present at all.
     hit_scores = {}
     for i, seg in enumerate(segments):
-        text_lower = seg.text.lower()
-        hits = sum(text_lower.count(t) for t in topics_lower)
+        hits = _keyword_hit_score(seg, topics_lower)
         if hits > 0:
-            hit_scores[i] = float(hits)
+            hit_scores[i] = hits
     return _merge_segments(segments, hit_scores)
 
 

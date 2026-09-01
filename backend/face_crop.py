@@ -21,16 +21,25 @@ def _get_detector():
     return _detector
 
 
-def find_face_center_x(video_path: str, start: float, end: float, sample_count: int = 5):
-    """Sample a few frames within [start, end] and return the average detected face
-    center x-coordinate (in source pixels), or None if no face was found in any
+def find_face_center_x(video_path: str, start: float, end: float, sample_count: int = 5,
+                        source_width: int = None):
+    """Sample a few frames within [start, end] and return a representative detected
+    face center x-coordinate (in source pixels), or None if no face was found in any
     sampled frame — caller should fall back to a plain center-crop in that case.
+
+    Real two-speaker podcasts previously broke this: averaging every sampled face's
+    x-center together blends two distinct speaker positions into the empty gap
+    between them (confirmed as the actual bug from real testing, not just imprecise
+    tracking). Instead, cluster the sampled centers by proximity and return the mean
+    of the largest cluster — the most-consistently-detected face position, not a
+    blend of multiple different faces.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return None
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_width = source_width or int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
     detector = _get_detector()
     centers = []
 
@@ -53,18 +62,45 @@ def find_face_center_x(video_path: str, start: float, end: float, sample_count: 
     cap.release()
     if not centers:
         return None
-    return sum(centers) / len(centers)
+    return _largest_cluster_mean(centers, frame_width)
 
 
-def compute_crop_x(video_path: str, start: float, end: float, source_width: int, target_width: int) -> int:
-    """Return the left-edge x-coordinate for a target_width-wide crop, centered on
-    the detected face if found, otherwise centered on the frame.
+def _largest_cluster_mean(centers: list, frame_width: int, threshold_frac: float = 0.15) -> float:
+    """Group nearby x-centers together (within threshold_frac * frame_width pixels
+    of each other) and return the mean of the largest group. With a single speaker
+    (or all samples landing on the same face), this is equivalent to the old
+    average. With two alternating speakers, it picks whichever one was detected
+    more consistently instead of splitting the difference between both.
     """
-    face_x = find_face_center_x(video_path, start, end)
-    if face_x is None:
-        center_x = source_width / 2
+    threshold = frame_width * threshold_frac
+    centers_sorted = sorted(centers)
+    clusters = []
+    current = [centers_sorted[0]]
+    for c in centers_sorted[1:]:
+        if c - current[-1] <= threshold:
+            current.append(c)
+        else:
+            clusters.append(current)
+            current = [c]
+    clusters.append(current)
+    best = max(clusters, key=len)
+    return sum(best) / len(best)
+
+
+def compute_crop_x(video_path: str, start: float, end: float, source_width: int, target_width: int,
+                    manual_center_x: float = None) -> int:
+    """Return the left-edge x-coordinate for a target_width-wide crop, centered on
+    a manually-supplied position if given, otherwise the detected face, otherwise
+    the frame center.
+
+    manual_center_x, if given, is a 0.0-1.0 fraction of source_width (not a pixel
+    value) — lets callers pass a UI slider's 0-1 position directly.
+    """
+    if manual_center_x is not None:
+        center_x = manual_center_x * source_width
     else:
-        center_x = face_x
+        face_x = find_face_center_x(video_path, start, end, source_width=source_width)
+        center_x = face_x if face_x is not None else source_width / 2
     crop_x = int(center_x - target_width / 2)
     # Clamp so the crop window stays within the source frame.
     crop_x = max(0, min(crop_x, source_width - target_width))

@@ -1,0 +1,285 @@
+* {
+  box-sizing: border-box;
+}
+
+.app {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #1a1a1a;
+}
+
+h1 {
+  font-size: 22px;
+  margin-bottom: 16px;
+}
+
+h2 {
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.card {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+  background: #fff;
+}
+
+form.card label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  color: #444;
+}
+
+form.card input,
+form.card select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  font-size: 14px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-weight: normal;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+}
+
+.row > label,
+.row > input {
+  flex: 1;
+}
+
+button {
+  padding: 8px 14px;
+  font-size: 14px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #f5f5f5;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: #2563eb;
+  color: white;
+  border: none;
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px;
+}
+
+.button-like {
+  padding: 8px 14px;
+  font-size: 14px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #f5f5f5;
+  text-decoration: none;
+  color: #1a1a1a;
+  display: inline-block;
+}
+
+.error {
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+.stages {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stage-step {
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  background: #f0f0f0;
+  color: #999;
+}
+
+.stage-step.done {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.stage-step.active {
+  background: #e3f2fd;
+  color: #1565c0;
+  font-weight: 600;
+}
+
+.stage-step.error {
+  background: #fdecea;
+  color: #b91c1c;
+}
+
+.download-bar-track {
+  position: relative;
+  margin-top: 6px;
+  height: 16px;
+  background: #e0e0e0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.download-bar-fill {
+  height: 100%;
+  background: #1565c0;
+  transition: width 0.3s ease;
+}
+
+.download-bar-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #222;
+}
+
+.mode-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.mode-toggle button {
+  flex: 1;
+  font-weight: normal;
+}
+
+.mode-toggle button.toggle-active {
+  background: #2563eb;
+  color: white;
+  border-color: #2563eb;
+}
+
+.marker-track {
+  position: relative;
+  height: 20px;
+  background: #eee;
+  border-radius: 4px;
+  margin: 8px 0;
+}
+
+.marker {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: #f59e0b;
+  border-radius: 3px;
+  cursor: pointer;
+  min-width: 4px;
+}
+
+.manual-tag {
+  font-size: 11px;
+  font-weight: normal;
+  color: #666;
+  background: #eee;
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin-left: 8px;
+}
+
+.clips-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.clip-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.badge {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+
+.badge.pass {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.badge.fail {
+  background: #fdecea;
+  color: #b91c1c;
+}
+
+.clip-meta {
+  font-size: 13px;
+  color: #666;
+  margin: 4px 0;
+}
+
+.clip-reason {
+  font-size: 13px;
+  color: #444;
+  font-style: italic;
+  margin: 4px 0;
+}
+
+.issues {
+  font-size: 13px;
+  color: #b91c1c;
+  margin: 4px 0 8px;
+  padding-left: 18px;
+}
+
+.preview-video {
+  width: 100%;
+  max-height: 360px;
+  border-radius: 4px;
+  background: #000;
+  margin: 8px 0;
+}
+
+.trim-editor {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed #ccc;
+}
+
+.slider-group label {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.slider-group input[type="range"] {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.duration-readout {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 8px 0;
+}

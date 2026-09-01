@@ -7,6 +7,14 @@ import os
 _PROFILES_PATH = os.path.join(os.path.dirname(__file__), "..", "campaigns.json")
 
 
+def list_profiles() -> dict:
+    """Return all saved profiles, keyed by name — used to populate a UI dropdown."""
+    if not os.path.exists(_PROFILES_PATH):
+        return {}
+    with open(_PROFILES_PATH) as f:
+        return json.load(f)
+
+
 def load_profile(name: str) -> dict:
     if not os.path.exists(_PROFILES_PATH):
         raise FileNotFoundError(f"No campaigns.json found — no profiles saved yet")

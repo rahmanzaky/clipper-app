@@ -44,7 +44,14 @@ class Segment:
     words: list
 
 
-def transcribe(audio_path: str) -> list:
+def transcribe_stream(audio_path: str):
+    """Yield Segment objects as faster-whisper produces them, instead of blocking
+    until the entire file is transcribed. faster-whisper's model.transcribe() already
+    returns a lazy generator internally — this just avoids eagerly draining it into a
+    list, so a caller (the web API) can react to segments as they arrive and show
+    incremental progress/highlights during a long transcription instead of only after
+    it completes.
+    """
     model = _get_model()
     segments, info = model.transcribe(
         audio_path,
@@ -56,16 +63,16 @@ def transcribe(audio_path: str) -> list:
     # For genuinely code-switched audio (like the bilingual test clip), this whole-file
     # label is an approximation, not a per-segment ground truth.
     detected_language = info.language
-    result = []
     for seg in segments:
         words = [Word(w.word.strip(), w.start, w.end) for w in (seg.words or [])]
-        result.append(
-            Segment(
-                text=seg.text.strip(),
-                start=seg.start,
-                end=seg.end,
-                language=detected_language,
-                words=words,
-            )
+        yield Segment(
+            text=seg.text.strip(),
+            start=seg.start,
+            end=seg.end,
+            language=detected_language,
+            words=words,
         )
-    return result
+
+
+def transcribe(audio_path: str) -> list:
+    return list(transcribe_stream(audio_path))
