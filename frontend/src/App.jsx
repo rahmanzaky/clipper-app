@@ -32,8 +32,12 @@ function ProcessForm({ onSubmit, onUpload, disabled }) {
     const p = profiles[name];
     if (!p) return;
     setTopics((p.topics || []).join(", "));
-    setMinDuration(p.min_duration);
-    setMaxDuration(p.max_duration);
+    // Fall back to the current value rather than undefined — a hand-edited or
+    // legacy-format campaigns.json entry missing these fields would otherwise flip
+    // the number input from controlled to uncontrolled (a real React warning
+    // confirmed in this app's dev console).
+    setMinDuration(p.min_duration ?? minDuration);
+    setMaxDuration(p.max_duration ?? maxDuration);
     setHashtag(p.hashtag || "");
   };
 
@@ -55,6 +59,24 @@ function ProcessForm({ onSubmit, onUpload, disabled }) {
       loadProfiles();
     } catch (e) {
       setError("Failed to save profile: " + e.message);
+    }
+  };
+
+  const handleDeleteProfile = async () => {
+    if (!selectedProfile) return;
+    if (!window.confirm(`Delete saved profile "${selectedProfile}"?`)) return;
+    try {
+      const res = await fetch(`${API}/api/profiles/${encodeURIComponent(selectedProfile)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `Request failed (${res.status})`);
+      }
+      setSelectedProfile("");
+      loadProfiles();
+    } catch (e) {
+      setError("Failed to delete profile: " + e.message);
     }
   };
 
@@ -95,20 +117,30 @@ function ProcessForm({ onSubmit, onUpload, disabled }) {
 
       <label>
         Saved campaign profile
-        <select
-          value={selectedProfile}
-          onChange={(e) => applyProfile(e.target.value)}
-          disabled={disabled}
-        >
-          <option value="">
-            {Object.keys(profiles).length > 0 ? "-- none --" : "-- no saved profiles yet --"}
-          </option>
-          {Object.keys(profiles).map((name) => (
-            <option key={name} value={name}>
-              {name}
+        <div className="row">
+          <select
+            value={selectedProfile}
+            onChange={(e) => applyProfile(e.target.value)}
+            disabled={disabled}
+            style={{ flex: 1 }}
+          >
+            <option value="">
+              {Object.keys(profiles).length > 0 ? "-- none --" : "-- no saved profiles yet --"}
             </option>
-          ))}
-        </select>
+            {Object.keys(profiles).map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={handleDeleteProfile}
+            disabled={disabled || !selectedProfile}
+          >
+            Delete
+          </button>
+        </div>
       </label>
 
       <div className="mode-toggle">
@@ -228,7 +260,7 @@ const STAGE_LABELS = {
   error: "Error",
 };
 
-function ProgressBar({ stage, downloadPercent }) {
+function ProgressBar({ stage, downloadPercent, renderProgress }) {
   const stages = ["queued", "downloading", "transcribing", "detecting", "rendering", "done"];
   const idx = stages.indexOf(stage);
   return (
@@ -252,6 +284,17 @@ function ProgressBar({ stage, downloadPercent }) {
                   style={{ width: `${downloadPercent || 0}%` }}
                 />
                 <span className="download-bar-label">{Math.round(downloadPercent || 0)}%</span>
+              </div>
+            )}
+            {s === "rendering" && stage === "rendering" && renderProgress && renderProgress.total > 0 && (
+              <div className="download-bar-track">
+                <div
+                  className="download-bar-fill"
+                  style={{ width: `${(renderProgress.done / renderProgress.total) * 100}%` }}
+                />
+                <span className="download-bar-label">
+                  {renderProgress.done} / {renderProgress.total} clips
+                </span>
               </div>
             )}
           </div>
@@ -637,6 +680,7 @@ function App() {
   const [stage, setStage] = useState(null);
   const [videoReady, setVideoReady] = useState(false);
   const [downloadPercent, setDownloadPercent] = useState(0);
+  const [renderProgress, setRenderProgress] = useState(null);
   const [highlightMarkers, setHighlightMarkers] = useState([]);
   const [clips, setClips] = useState([]);
   const [renderErrors, setRenderErrors] = useState([]);
@@ -651,6 +695,7 @@ function App() {
     setSourceDuration(null);
     setVideoReady(false);
     setDownloadPercent(0);
+    setRenderProgress(null);
     setHighlightMarkers([]);
   };
 
@@ -706,6 +751,7 @@ function App() {
         const data = await res.json();
         setStage(data.stage);
         if (typeof data.download_percent === "number") setDownloadPercent(data.download_percent);
+        if (data.render_progress) setRenderProgress(data.render_progress);
         if (data.highlight_markers) setHighlightMarkers(data.highlight_markers);
         if (data.clips) setClips(data.clips);
 
@@ -754,7 +800,9 @@ function App() {
       <h1>Auto Video Clipper</h1>
       <ProcessForm onSubmit={submitJob} onUpload={submitUpload} disabled={isProcessing} />
 
-      {stage && <ProgressBar stage={stage} downloadPercent={downloadPercent} />}
+      {stage && (
+        <ProgressBar stage={stage} downloadPercent={downloadPercent} renderProgress={renderProgress} />
+      )}
 
       {errorMsg && (
         <div className="card">
@@ -801,6 +849,50 @@ function App() {
           ))}
         </div>
       )}
+
+      <MaintenancePanel />
+    </div>
+  );
+}
+
+function MaintenancePanel() {
+  const [result, setResult] = useState(null);
+  const [running, setRunning] = useState(false);
+  const [err, setErr] = useState("");
+
+  const handleCleanup = async () => {
+    setRunning(true);
+    setErr("");
+    setResult(null);
+    try {
+      const res = await fetch(`${API}/api/maintenance/cleanup`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `Request failed (${res.status})`);
+      }
+      setResult(await res.json());
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="card maintenance-panel">
+      <p className="clip-meta">
+        Downloaded videos and rendered clips older than 24h are cleaned up automatically.
+        You can also trigger it manually:
+      </p>
+      <button onClick={handleCleanup} disabled={running}>
+        {running ? "Cleaning up..." : "Clean up old files now"}
+      </button>
+      {result && (
+        <p className="clip-meta">
+          Removed {result.jobs_removed} finished job record(s) and {result.files_removed} file(s).
+        </p>
+      )}
+      {err && <p className="error">{err}</p>}
     </div>
   );
 }

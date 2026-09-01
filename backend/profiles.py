@@ -26,6 +26,19 @@ def load_profile(name: str) -> dict:
     return profiles[name]
 
 
+def delete_profile(name: str) -> None:
+    if not os.path.exists(_PROFILES_PATH):
+        raise KeyError(f"No profile named '{name}'. Available: (none)")
+    with open(_PROFILES_PATH) as f:
+        profiles = json.load(f)
+    if name not in profiles:
+        available = ", ".join(profiles.keys()) or "(none)"
+        raise KeyError(f"No profile named '{name}'. Available: {available}")
+    del profiles[name]
+    with open(_PROFILES_PATH, "w") as f:
+        json.dump(profiles, f, indent=2)
+
+
 def save_profile(name: str, topics: list, min_duration: float, max_duration: float, hashtag: str) -> None:
     profiles = {}
     if os.path.exists(_PROFILES_PATH):

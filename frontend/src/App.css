@@ -283,3 +283,12 @@ button.primary {
   font-weight: 600;
   margin: 8px 0;
 }
+
+.maintenance-panel {
+  opacity: 0.7;
+  font-size: 13px;
+}
+
+.maintenance-panel:hover {
+  opacity: 1;
+}
