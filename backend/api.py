@@ -8,10 +8,12 @@ any time without waiting for the automated pipeline, and re-trim any clip's dura
 after the fact (re-running the same face-crop + caption + compliance logic on the new
 bounds).
 """
+import glob
 import json
 import os
 import shutil
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -28,7 +30,7 @@ from transcriber import transcribe_stream
 from detector import _score_batch, _merge_segments, _keyword_hit_score, BATCH_SIZE
 from clipper import make_clip
 from compliance import CampaignProfile, check_clip
-from profiles import list_profiles, load_profile, save_profile
+from profiles import list_profiles, load_profile, save_profile, delete_profile
 
 WORK_DIR = os.path.join(os.path.dirname(__file__), "..", "work")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "output")
@@ -44,6 +46,11 @@ KEYWORD_UPDATE_EVERY = 5  # segments — how often to refresh highlight_markers 
 MANUAL_INDEX_BASE = 100_000  # manual clips are indexed well above any realistic
                               # automatic-candidate count, so the two index spaces
                               # never collide regardless of processing order.
+DEFAULT_RETENTION_HOURS = 24  # source videos, rendered clips, quarantined failures,
+                               # and finished in-memory job records older than this
+                               # get pruned — this is a local single-user tool with no
+                               # DB, so work/ and output/_dev_failed/ otherwise grow
+                               # without bound across real usage sessions.
 
 app = FastAPI(title="Auto Video Clipper API")
 app.add_middleware(
@@ -55,6 +62,17 @@ app.add_middleware(
 
 # In-memory job store. Single-user local tool — no DB needed. Keyed by job_id.
 JOBS = {}
+
+
+@app.on_event("startup")
+def _cleanup_on_startup():
+    # JOBS itself doesn't survive a restart, so any files left over from a
+    # previous server run are already orphaned from this process's point of view —
+    # safe to sweep on boot instead of only relying on the opportunistic per-job
+    # cleanup below.
+    removed = _cleanup_orphaned_files()
+    if removed:
+        print(f"[api] Startup cleanup: removed {removed} orphaned file(s)/dir(s)")
 
 
 class ProcessRequest(BaseModel):
@@ -227,6 +245,7 @@ def _run_pipeline(job_id: str, req: ProcessRequest, local_video_path: str = None
         base = os.path.splitext(os.path.basename(video_path))[0]
         all_words = job["words"]
         clips = []
+        job["render_progress"] = {"done": 0, "total": len(candidates)}
 
         with ThreadPoolExecutor(max_workers=RENDER_WORKERS) as pool:
             futures = []
@@ -242,7 +261,9 @@ def _run_pipeline(job_id: str, req: ProcessRequest, local_video_path: str = None
                     clip = fut.result()
                 except Exception as e:
                     job.setdefault("render_errors", []).append(f"Clip {i}: {e}")
+                    job["render_progress"]["done"] += 1
                     continue
+                job["render_progress"]["done"] += 1
                 rendered_path = clip.pop("_rendered_path")
                 if _quarantine_if_failed(job, clip, rendered_path):
                     continue
@@ -266,11 +287,92 @@ def _run_pipeline(job_id: str, req: ProcessRequest, local_video_path: str = None
         job["error"] = str(e)
 
 
+def _cleanup_job_files(job: dict):
+    """Delete a finished job's rendered clips, quarantined failures, and downloaded
+    source video from disk. Best-effort — a missing file is not an error, since a
+    clip may have already been manually deleted or never existed (a render error).
+    """
+    for clip in job.get("clips", []):
+        path = os.path.join(OUTPUT_DIR, clip.get("clip_filename", ""))
+        if os.path.exists(path):
+            os.remove(path)
+    job_failed_dir = os.path.join(FAILED_DIR, job.get("id", ""))
+    if os.path.isdir(job_failed_dir):
+        shutil.rmtree(job_failed_dir, ignore_errors=True)
+    video_path = job.get("video_path")
+    if video_path and os.path.exists(video_path) and os.path.commonpath([video_path, WORK_DIR]) == WORK_DIR:
+        os.remove(video_path)
+
+
+def _prune_old_jobs(max_age_hours: float = DEFAULT_RETENTION_HOURS) -> int:
+    """Remove finished (done/error) in-memory job records and their files once
+    they're older than max_age_hours — otherwise JOBS (and work/ and
+    output/_dev_failed/) grow without bound across a long-running server session.
+    Jobs still in progress are never touched regardless of age.
+    """
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    for job_id in list(JOBS.keys()):
+        job = JOBS[job_id]
+        if job.get("stage") not in ("done", "error"):
+            continue
+        if job.get("created_at", time.time()) > cutoff:
+            continue
+        try:
+            _cleanup_job_files(job)
+        except Exception as e:
+            print(f"[api] Cleanup of job {job_id} failed (continuing): {e}")
+        del JOBS[job_id]
+        removed += 1
+    return removed
+
+
+def _cleanup_orphaned_files(max_age_hours: float = DEFAULT_RETENTION_HOURS) -> int:
+    """Remove leftover files in work/ and output/ (including output/_dev_failed/)
+    older than max_age_hours that aren't tracked by any current in-memory job —
+    covers files left behind by a previous server run, since JOBS itself doesn't
+    survive a restart (this tool's job state was never meant to be durable).
+    """
+    removed = 0
+    tracked_paths = {job.get("video_path") for job in JOBS.values() if job.get("video_path")}
+    tracked_paths |= {
+        os.path.join(OUTPUT_DIR, c.get("clip_filename", ""))
+        for job in JOBS.values() for c in job.get("clips", [])
+    }
+    cutoff = time.time() - max_age_hours * 3600
+    patterns = [
+        os.path.join(WORK_DIR, "*"),
+        os.path.join(OUTPUT_DIR, "*.mp4"),
+    ]
+    for pattern in patterns:
+        for path in glob.glob(pattern):
+            if path in tracked_paths or os.path.isdir(path):
+                continue
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                continue
+    for job_dir in glob.glob(os.path.join(FAILED_DIR, "*")):
+        if not os.path.isdir(job_dir):
+            continue
+        try:
+            if os.path.getmtime(job_dir) < cutoff:
+                shutil.rmtree(job_dir, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def _start_job(req: ProcessRequest, local_video_path: str = None) -> str:
+    _prune_old_jobs()  # best-effort housekeeping, opportunistic on each new submission
     job_id = str(uuid.uuid4())
     JOBS[job_id] = {
         "id": job_id, "stage": "queued", "request": req.model_dump(),
         "next_manual_index": MANUAL_INDEX_BASE,
+        "created_at": time.time(),
         # Guards job["clips"] and job["next_manual_index"] against the real race
         # between the background pipeline thread finalizing rendered clips and a
         # concurrent /manual-clip request (e.g. two quick "Create clip now" clicks,
@@ -323,6 +425,8 @@ def get_job(job_id: str):
         response["download_percent"] = job["download_percent"]
     if job.get("highlight_markers"):
         response["highlight_markers"] = job["highlight_markers"]
+    if job.get("render_progress"):
+        response["render_progress"] = job["render_progress"]
     if job["stage"] == "error":
         response["error"] = job["error"]
     # Include clips whenever any exist — not just once the whole job is "done" —
@@ -558,3 +662,23 @@ def get_profiles():
 def post_profile(req: SaveProfileRequest):
     save_profile(req.name, req.topics, req.min_duration, req.max_duration, req.hashtag)
     return {"saved": req.name}
+
+
+@app.delete("/api/profiles/{name}")
+def delete_profile_endpoint(name: str):
+    try:
+        delete_profile(name)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"deleted": name}
+
+
+@app.post("/api/maintenance/cleanup")
+def run_cleanup(max_age_hours: float = DEFAULT_RETENTION_HOURS):
+    """Manually prune finished jobs and files older than max_age_hours (default
+    24h) — lets the user reclaim disk space on demand instead of waiting for the
+    next server restart or job submission to trigger it opportunistically.
+    """
+    jobs_removed = _prune_old_jobs(max_age_hours)
+    files_removed = _cleanup_orphaned_files(max_age_hours)
+    return {"jobs_removed": jobs_removed, "files_removed": files_removed}
