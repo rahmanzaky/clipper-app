@@ -25,6 +25,7 @@ function ProcessForm({ onSubmit, onUpload, disabled }) {
   const [url, setUrl] = useState("");
   const [file, setFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef(null);
   const [topics, setTopics] = useState("");
   const [minDuration, setMinDuration] = useState(8);
   const [maxDuration, setMaxDuration] = useState(60);
@@ -101,6 +102,10 @@ function ProcessForm({ onSubmit, onUpload, disabled }) {
   const handleSubmit = (e) => {
     e.preventDefault();
     setError("");
+    if (Number(minDuration) >= Number(maxDuration)) {
+      setError("Min duration must be less than max duration.");
+      return;
+    }
     const topicList = topics.split(",").map((t) => t.trim()).filter(Boolean);
     if (mode === "url") {
       if (!url.trim()) {
@@ -195,6 +200,8 @@ function ProcessForm({ onSubmit, onUpload, disabled }) {
         <label>
           Video file
           <div
+            role="button"
+            tabIndex={0}
             className={"dropzone" + (dragOver ? " dragover" : "")}
             onDragOver={(e) => {
               e.preventDefault();
@@ -208,12 +215,24 @@ function ProcessForm({ onSubmit, onUpload, disabled }) {
               const dropped = e.dataTransfer.files?.[0];
               if (dropped) setFile(dropped);
             }}
+            onKeyDown={(e) => {
+              // The file input is visually hidden (display:none removes it from
+              // the tab order entirely, so it can never receive focus on its
+              // own) — without this, the dropzone would be completely
+              // unreachable by keyboard despite looking clickable.
+              if (!disabled && (e.key === "Enter" || e.key === " ")) {
+                e.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
           >
             {file ? file.name : "Drag a video file here, or click to choose one"}
             {/* Nested inside the <label> — native label-click-forwarding already
-                opens this picker on click, so no separate onClick is needed here
-                (adding one would double-trigger the file dialog). */}
+                opens this picker on a mouse click, so there's no onClick here
+                (adding one would double-trigger the dialog) — only onKeyDown
+                above needs the ref, for keyboard users. */}
             <input
+              ref={fileInputRef}
               type="file"
               accept="video/*"
               onChange={(e) => setFile(e.target.files?.[0] || null)}
@@ -741,9 +760,17 @@ function CropEditor({ jobId, clip, onApplied }) {
         {segments.map((s, i) => (
           <div
             key={i}
+            role="button"
+            tabIndex={0}
             className={"segment-block" + (i === activeIndex ? " segment-block-active" : "")}
             style={{ width: `${((s.end - s.start) / duration) * 100}%` }}
             onClick={() => seekToSegment(i)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                seekToSegment(i);
+              }
+            }}
             title={`Segment ${i + 1}: ${formatTime(s.start)} – ${formatTime(s.end)}`}
           >
             {i + 1}
@@ -897,11 +924,22 @@ function ClipCard({ jobId, clip, sourceDuration, onClipUpdated }) {
       <div className="clip-header">
         <h3>
           Clip {clip.index + 1}
-          {clip.manual && <span className="manual-tag">manual</span>}
+          {clip.manual && (
+            <span className="manual-tag" title="Created by you from the timeline, not auto-detected">
+              manual
+            </span>
+          )}
         </h3>
         <div className="row" style={{ gap: 8, alignItems: "center" }}>
           {!!clip.score && <ScoreGauge score={clip.score} />}
-          <span className={"badge " + (clip.compliance.passed ? "pass" : "fail")}>
+          <span
+            className={"badge " + (clip.compliance.passed ? "pass" : "fail")}
+            title={
+              clip.compliance.passed
+                ? "Meets your campaign's min/max duration and hashtag requirements"
+                : "Doesn't meet one or more campaign requirements — see the list below"
+            }
+          >
             {clip.compliance.passed ? "PASS" : "FAIL"}
           </span>
         </div>
