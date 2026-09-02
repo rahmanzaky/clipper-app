@@ -1,28 +1,78 @@
-# Auto Video Clipper — Phase 3
+# Auto Video Clipper
 
-Paste a YouTube URL, get compliance-checked vertical clips out. Built for competing
-in paid clipping campaigns (Whop/Evangelist-style — e.g. Lovable Clipping).
+Paste a video (YouTube URL, a public Google Drive link, or upload a file directly),
+get compliance-checked vertical clips out. Built for competing in paid clipping
+campaigns (Whop/Evangelist-style — e.g. Lovable Clipping).
+
+A FastAPI backend wraps the full pipeline (download → transcribe → detect → crop →
+caption → compliance-check); a React web UI drives it — submit a job, watch progress
+live, review ranked candidate clips, and edit any of them (duration, crop, captions)
+after the fact without re-running the whole pipeline.
 
 ## What it does
 
-1. Downloads the source video (`yt-dlp`)
-2. Transcribes it bilingually, EN/ID, with word-level timestamps (`faster-whisper`,
-   large-v3-turbo model)
-3. Finds candidate clips two ways, ranked best-first by relevance score:
+1. **Gets the source video** — a YouTube URL, a public Google Drive share link (both
+   via `yt-dlp`), or a directly-uploaded local file (skips the download step entirely).
+2. **Transcribes it bilingually** (EN/ID, word-level timestamps, `faster-whisper`) —
+   streamed, so highlight detection can start working before transcription finishes.
+3. **Finds candidate clips**, ranked best-first by relevance score:
    - If `GROQ_API_KEY` is set: asks Groq's free-tier LLM which segments discuss your
-     topic (0-10 relevance score each) — catches paraphrases keyword matching misses
-     (verified: correctly flagged a segment referencing a topic indirectly, with no
-     literal keyword present, that keyword matching completely missed)
+     topic (0–10 relevance score each) — catches paraphrases keyword matching misses.
    - Otherwise: falls back to plain keyword matching (zero setup, always works),
-     scored by keyword-hit density
-4. Cuts each candidate, **face-tracks the crop to 9:16** (OpenCV Haar cascade —
-   centers on the detected speaker's face, falls back to a plain center-crop if no
-   face is found in the sampled frames), burns in **word-level karaoke-style
-   captions** (ASS format, CapCut-style highlight sweep), exports to `output/`
-5. Checks each clip against your campaign's rules (min/max duration, required
-   hashtag) and reports pass/fail before you submit anywhere
+     scored by keyword-hit density.
+   - Highlight markers appear on the source-video timeline progressively as
+     detection runs, not just after the whole job finishes — you can also select
+     your own range and cut a clip manually at any time, without waiting.
+4. **Cuts, crops to 9:16, and captions each candidate**:
+   - Face-tracked crop (OpenCV Haar cascade), clustering multiple sampled face
+     positions instead of averaging them — averaging blends two different
+     speakers' positions into the empty gap between them, clustering picks the
+     more consistently-detected one instead.
+   - **Multi-segment crop**: a clip can span more than one camera cut in the
+     source (a multicam-edited podcast switching between a wide shot and
+     close-ups) — shot boundaries are auto-detected (via sustained face-presence
+     changes, not color, since same-set/same-lighting camera angles don't
+     reliably differ in color) and each resulting segment gets its own
+     independently-computed crop position. A manual segment editor (numbered,
+     clickable timeline blocks; split/merge; per-segment pan slider; live
+     masked-overlay preview of exactly what stays in frame) lets you override
+     auto-detection per segment.
+   - Plain, elegant burned-in captions (movie-subtitle style — no karaoke-style
+     word-highlight animation), editable per line after the fact (text only,
+     same timing), Descript/CapCut-style transcript-based editing.
+5. **Checks each clip against your campaign's rules** (min/max duration, required
+   hashtag) and reports pass/fail before you submit anywhere. Non-compliant clips
+   are quarantined to `output/_dev_failed/` instead of cluttering your results.
 6. **Campaign profiles** — save a named set of topic/duration/hashtag rules once,
-   reload it by name on future runs instead of re-typing flags
+   reload (or delete) it from a dropdown on future runs instead of re-typing them.
+
+## Running it
+
+Two processes: the backend API and the frontend dev server.
+
+```bash
+# Backend
+cd backend
+source ../venv/bin/activate          # see Setup below if this doesn't exist yet
+HF_HUB_DISABLE_XET=1 WHISPER_MODEL=small uvicorn api:app --host 127.0.0.1 --port 8000
+```
+
+```bash
+# Frontend (separate terminal)
+cd frontend
+npm install                          # first time only
+npm run dev
+```
+
+Then open **http://localhost:5173**. `WHISPER_MODEL=small` above is for fast local
+iteration — drop it (or set `WHISPER_MODEL=large-v3-turbo`, the default) for real
+campaign submissions where bilingual transcription accuracy matters more than speed.
+
+**Job state lives in memory only** — restarting the backend loses all in-progress
+and completed jobs (their rendered files on disk are cleaned up automatically after
+24h, or immediately via the "Clean up old files now" button). A browser page refresh
+does *not* lose your job — the job ID is kept in the URL and reattaches automatically;
+only an actual backend restart does.
 
 ## Setup
 
@@ -33,7 +83,12 @@ source ../venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Requires `ffmpeg-full`, not plain `ffmpeg`** — the burned-in captions use libass,
+```bash
+cd frontend
+npm install
+```
+
+**Requires `ffmpeg-full`, not plain `ffmpeg`** — burned-in captions use libass,
 which Homebrew's regular `ffmpeg` formula doesn't include:
 
 ```bash
@@ -58,8 +113,9 @@ put it in a `.env` file at the project root (never committed — already in
 GROQ_API_KEY=your-key-here
 ```
 
-`main.py` loads this automatically via `python-dotenv`. Without a key, the tool still
-works using keyword matching instead — weaker recall on paraphrases, but zero setup.
+Both `api.py` (web backend) and `main.py` (CLI) load this automatically via
+`python-dotenv`. Without a key, the tool still works using keyword matching instead —
+weaker recall on paraphrases, but zero setup.
 
 The first run downloads the Whisper model weights from Hugging Face (one-time,
 ~150MB for `small`, ~1.5GB for `large-v3-turbo`). If your connection is flaky and
@@ -77,7 +133,10 @@ best bilingual accuracy but the biggest download):
 export WHISPER_MODEL=small   # faster first run, weaker Indonesian accuracy
 ```
 
-## Usage
+## CLI mode (still available)
+
+The original CLI entry point still works, useful for scripting a single run without
+the web UI:
 
 ```bash
 source venv/bin/activate
@@ -88,76 +147,17 @@ python main.py --url "https://youtube.com/watch?v=..." \
   --hashtag "#LovablePartner"
 ```
 
-Clips land in `output/`, named `<video_id>_clip1.mp4`, `_clip2.mp4`, etc., ranked
-best-first by relevance score.
-
-### Campaign profiles
-
-Save a campaign's rules once:
-
 ```bash
-python main.py --url "..." --topic "Lovable" --topic "Anton" \
-  --min-duration 15 --max-duration 60 --hashtag "#LovablePartner" \
-  --save-profile lovable
-```
-
-Then reuse it on future runs without re-typing the flags:
-
-```bash
+# Save a campaign's rules once, reuse by name later
+python main.py --url "..." --topic "Lovable" --min-duration 15 --max-duration 60 \
+  --hashtag "#LovablePartner" --save-profile lovable
 python main.py --url "https://youtube.com/watch?v=DIFFERENT_VIDEO" --profile lovable
 ```
 
-Profiles are stored in `campaigns.json` at the project root (gitignored — it's your
+Clips land in `output/`, ranked best-first by relevance score. The web UI is the
+primary interface now — this remains for quick one-off scripted runs. Profiles saved
+via the CLI and the web UI share the same `campaigns.json` (gitignored — your
 personal campaign list, not committed).
-
-## Real speed benchmark result — processing is slow on long content (not a compliance issue)
-
-**Note on campaign timing:** the Lovable-style "submit within 10 minutes" rule is
-about the gap between *posting a clip* and *submitting its URL* to the campaign
-platform for view-tracking — it has nothing to do with how long clip production
-takes. Nothing below is "failing to meet" that rule. Speed still matters for two
-real reasons: more clips produced per hour directly affects pay-per-view earnings,
-and nobody wants to sit around waiting unnecessarily long per video.
-
-Tested against a real ~16.4-minute podcast (not a toy clip), using the `small`
-Whisper model (the default `large-v3-turbo`'s ~1.5GB download was impractically slow
-on this network — actual production use would be *slower* than these numbers, not
-faster):
-
-| Stage | Real measured time | Real-time factor |
-|---|---|---|
-| Transcription | ~460-525s for 16.4 min of audio | ~1.9x realtime |
-| Groq detection (328 segments, 9 batches) | 48-137s, highly variable | rate-limit-bound, not compute-bound |
-
-**Extrapolated to a real 30-60 minute campaign podcast**, transcription alone would
-take roughly **16-32 minutes** with the `small` model. The actual default model
-(`large-v3-turbo`) is larger and would be slower still. That's a real amount of time
-to wait per source video, and worth improving for throughput — just not a rule
-violation.
-
-**A second, separate real bug this benchmark uncovered and fixed:** the original
-`detect_groq()` sent an entire transcript as one prompt. On this real 328-segment
-transcript that failed outright (empty/invalid LLM response), and retrying hit
-Groq's free-tier rate limit (429) immediately after. Fixed by batching (`BATCH_SIZE`
-in `detector.py`, 25 segments/call) with inter-batch pacing and per-batch
-retry-then-skip (one failed batch no longer sinks the whole transcript's detection)
-— but **Groq's free-tier rate limit is still a real, observed bottleneck** on a
-transcript this size; expect multiple 429-triggered retries in practice, not just in
-theory.
-
-**What this means practically right now:** processing a real 30-60 minute podcast
-takes a real amount of time (tens of minutes), which is worth improving for
-throughput/earnings even though it isn't blocking any campaign rule. Honest options
-going forward, not yet decided or implemented:
-- A faster transcription path (GPU/MLX-accelerated Whisper instead of CPU int8,
-  or a smaller model as the real default rather than just a testing fallback)
-- A paid Groq tier (removes the rate-limit bottleneck)
-- Parallelizing what can be parallelized (transcription is inherently sequential
-  per audio stream, but cut/crop/caption across multiple candidate clips currently
-  runs one at a time and could run concurrently)
-
-This is exactly the kind of gap that only showed up by testing against real-length
-content instead of short clips — flagged here rather than glossed over.
 
 ## Known limitations
 
@@ -165,15 +165,19 @@ content instead of short clips — flagged here rather than glossed over.
   detects one language for the entire audio file, not per segment — for genuinely
   code-switched EN/ID content, the reported `language` on each segment is the
   whole-file majority language, not a true per-segment detection. Transcription
-  *accuracy* on code-switched speech is still strong (verified against a real
-  bilingual test clip: correctly transcribed pure Indonesian, a code-switched
-  EN→ID sentence, and a mostly-English sentence, all in one file) — only the
-  per-segment *language label* is approximate.
-- **Face tracking is single-face-oriented.** Picks the largest detected face per
-  sampled frame; with two speakers side by side it doesn't yet pick "whichever one
-  is currently talking," just the more prominent face. Falls back to center-crop
-  cleanly if no face is found at all.
-- **No React frontend yet** — this is a CLI tool for now.
+  *accuracy* on code-switched speech is still strong — only the per-segment
+  *language label* is approximate.
+- **Multi-segment crop detection is presence-based, not identity-based.** It detects
+  *when the framing changes* (a face appears/disappears, or shifts position) well
+  enough to split a clip at real camera cuts, but it doesn't track *which specific
+  person* is on screen — two different segments both showing "a face" are each
+  cropped independently and correctly, but the system has no concept of "this is
+  speaker A again." Good enough for the wide-shot/close-up cut problem it was built
+  to fix; not full active-speaker tracking.
+- **Backend restart loses all job state** (by design — no database; see "Running
+  it" above). A page refresh alone is fine.
+- **Compliance checks are clip-level only.** Account-level campaign requirements
+  (comments-on, minimum-tier viewership, etc.) aren't and can't be checked here.
 
 ## Testing
 
@@ -183,42 +187,31 @@ source ../venv/bin/activate
 pytest tests/ -v
 ```
 
-29 tests, pure logic only (no network/model calls), runs in well under a second.
-Covers `detector.py`'s merge/scoring/ranking logic (including a real bug this suite
-caught on first run: keyword scoring counted *whether* a topic appeared, not *how
-many times* — "Lovable Lovable Lovable" scored the same as one mention, now fixed),
-`compliance.py`'s pass/fail rules, `captions.py`'s ASS timestamp math, and
-`face_crop.py`'s crop-clamping boundary logic.
+42 tests, pure logic only (no network/model calls), runs in well under a second.
+Covers `detector.py`'s merge/scoring/ranking logic, `compliance.py`'s pass/fail rules,
+`captions.py`'s ASS timestamp math and plain-caption building, and `face_crop.py`'s
+crop-clamping boundary logic, clustering, and shot-boundary detection (the latter's
+test fixtures are real recorded sample sequences from two calibration videos, not
+invented data — see the module docstring for how the detection approach was chosen).
 
 ## Error handling
 
 `downloader.py` and `detector.py`'s Groq path both retry transient failures with
-exponential backoff (`retry.py`) before giving up — verified for real by forcing an
-invalid Groq key (confirmed 3 retry attempts, then a clean fallback to keyword
-matching) and an invalid video URL (confirmed 3 retries, then a clear error message
-instead of a raw traceback). `main.py` wraps each pipeline stage so a failure prints
-an actionable `[FAILED at <stage>]` message; a single clip's cut/crop/caption failure
-skips that clip and continues with the rest of the batch rather than aborting
-everything.
+exponential backoff (`retry.py`) before giving up. `api.py` wraps each pipeline stage
+so a failure produces a clear `stage: "error"` with a readable message instead of a
+raw traceback; a single clip's cut/crop/caption failure skips that clip and continues
+with the rest of the batch rather than aborting everything.
 
 ## Verification performed
 
-Every feature above was tested with real execution, not just written and assumed to
-work — this caught several real bugs along the way (an ffmpeg filter syntax issue, a
-missing libass dependency, Hugging Face's Xet backend failing on an unstable network
-connection, a retired Groq model name, and a MediaPipe/matplotlib/macOS
-incompatibility that led to switching to OpenCV for face detection):
+Every feature has been tested with real execution, not just written and assumed to
+work — this caught real bugs along the way, including: an ffmpeg filter syntax issue,
+a missing libass dependency, a MediaPipe/matplotlib/macOS incompatibility, a stale
+React closure that silently re-fetched an endpoint on every poll instead of once, a
+missing Cache-Control header that made Safari serve pre-edit video bytes after a
+real, correctly-applied crop change, and a shot-detection approach (color histograms)
+that looked reasonable but failed on real same-lighting multicam footage — caught by
+testing against an actual problem clip, not just a synthetic one, before shipping it.
 
-- Face-tracked crop: computed crop offset confirmed different from plain-center
-  (100px vs 92px on a test frame) and visually confirmed centered on the actual face
-- Karaoke captions: visually confirmed the highlight sweeps word-by-word in sync
-  with speech across three extracted frames
-- Groq vs. keyword quality: real side-by-side test where Groq caught a paraphrased
-  topic reference keyword matching missed entirely
-- Campaign profiles: saved a profile, loaded it in a separate run, confirmed
-  identical results
-- Bilingual transcription: real synthetic EN/ID speech (macOS `say -v Damayanti`)
-  transcribed correctly across a pure-Indonesian sentence, a code-switched sentence,
-  and a mostly-English sentence
-- Full regression: re-ran the original Phase 1 test video after all Phase 2 changes,
-  confirmed no breakage
+Full history of what was built, tested, and fixed in each phase is in the git log —
+each phase's commits describe the real testing performed, not just the feature added.
