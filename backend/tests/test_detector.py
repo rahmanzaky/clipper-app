@@ -103,6 +103,32 @@ def test_groq_parses_scored_response_and_ranks():
     assert all("LLM" in c.reason for c in candidates)
 
 
+def test_groq_uses_per_segment_why_when_given():
+    """Each candidate should carry Groq's own specific reason for its best segment,
+    not the same generic templated string for every candidate in the job — the
+    real gap this was built to fix: two completely different clips both showing
+    the identical "LLM: relevant to <topics>" text with zero specificity.
+    """
+    segments = make_segments()
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.json.return_value = {
+        "choices": [{"message": {"content": (
+            '[{"index": 2, "score": 9, "why": "names the product directly"}, '
+            '{"index": 6, "score": 7, "why": "compares it to a competitor"}]'
+        )}}]
+    }
+    with patch.dict(os.environ, {"GROQ_API_KEY": "fake-key-for-test"}):
+        with patch("requests.post", return_value=fake_response):
+            candidates = detect_groq(segments, ["Lovable", "Anton"])
+    assert len(candidates) == 2
+    reasons = {c.reason for c in candidates}
+    assert "names the product directly" in reasons
+    assert "compares it to a competitor" in reasons
+    # The two candidates must NOT share one identical generic reason.
+    assert len(reasons) == 2
+
+
 def test_groq_raises_without_api_key():
     with patch.dict(os.environ, {}, clear=True):
         try:
