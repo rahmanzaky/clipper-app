@@ -18,6 +18,7 @@ import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -54,7 +55,21 @@ DEFAULT_RETENTION_HOURS = 24  # source videos, rendered clips, quarantined failu
                                # DB, so work/ and output/_dev_failed/ otherwise grow
                                # without bound across real usage sessions.
 
-app = FastAPI(title="Auto Video Clipper API")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # JOBS itself doesn't survive a restart, so any files left over from a
+    # previous server run are already orphaned from this process's point of view —
+    # safe to sweep on boot instead of only relying on the opportunistic per-job
+    # cleanup below. (_cleanup_orphaned_files is defined later in this module —
+    # fine, since this only runs at actual server startup, well after the whole
+    # module has finished loading.)
+    removed = _cleanup_orphaned_files()
+    if removed:
+        print(f"[api] Startup cleanup: removed {removed} orphaned file(s)/dir(s)")
+    yield
+
+
+app = FastAPI(title="Auto Video Clipper API", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -64,17 +79,6 @@ app.add_middleware(
 
 # In-memory job store. Single-user local tool — no DB needed. Keyed by job_id.
 JOBS = {}
-
-
-@app.on_event("startup")
-def _cleanup_on_startup():
-    # JOBS itself doesn't survive a restart, so any files left over from a
-    # previous server run are already orphaned from this process's point of view —
-    # safe to sweep on boot instead of only relying on the opportunistic per-job
-    # cleanup below.
-    removed = _cleanup_orphaned_files()
-    if removed:
-        print(f"[api] Startup cleanup: removed {removed} orphaned file(s)/dir(s)")
 
 
 class ProcessRequest(BaseModel):
