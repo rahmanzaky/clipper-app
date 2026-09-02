@@ -292,3 +292,51 @@ button.primary {
 .maintenance-panel:hover {
   opacity: 1;
 }
+
+.segment-timeline {
+  position: relative;
+  display: flex;
+  height: 22px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 8px 0 16px;
+  border: 1px solid #ccc;
+}
+
+.segment-block {
+  height: 100%;
+  background: #dbe9fe;
+  border-right: 1px solid #fff;
+}
+
+.segment-block:nth-child(odd) {
+  background: #c7dcfd;
+}
+
+.segment-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #f59e0b;
+}
+
+.segment-row {
+  border-top: 1px dashed #ddd;
+  padding: 10px 0;
+}
+
+.segment-row:first-of-type {
+  border-top: none;
+}
+
+.segment-row label {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.segment-row input[type="range"] {
+  width: 100%;
+  margin-top: 4px;
+}

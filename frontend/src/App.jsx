@@ -350,7 +350,15 @@ function VideoTimeline({ jobId, sourceDuration, highlightMarkers, onManualClip }
   return (
     <div className="card">
       <h2>Source video</h2>
-      <video ref={videoRef} src={`${API}/api/video/source/${jobId}`} controls className="preview-video" />
+      <video
+        ref={videoRef}
+        src={`${API}/api/video/source/${jobId}`}
+        controls
+        className="preview-video"
+        onTimeUpdate={(e) => {
+          if (e.target.currentTime >= rangeEnd) e.target.pause();
+        }}
+      />
 
       {highlightMarkers && highlightMarkers.length > 0 && (
         <div className="marker-track">
@@ -466,6 +474,9 @@ function TrimEditor({ jobId, clip, sourceDuration, onApplied }) {
         src={`${API}/api/video/source/${jobId}`}
         controls
         className="preview-video"
+        onTimeUpdate={(e) => {
+          if (e.target.currentTime >= end) e.target.pause();
+        }}
       />
       <div className="slider-group">
         <label>
@@ -509,18 +520,63 @@ function TrimEditor({ jobId, clip, sourceDuration, onApplied }) {
 }
 
 function CropEditor({ jobId, clip, onApplied }) {
-  const [frac, setFrac] = useState(clip.crop_center_frac ?? 0.5);
+  const duration = clip.end - clip.start;
+  const initialSegments = clip.crop_segments && clip.crop_segments.length > 0
+    ? clip.crop_segments
+    : [{ start: 0, end: duration, crop_center_frac: clip.crop_center_frac ?? 0.5 }];
+  const [segments, setSegments] = useState(initialSegments);
+  // Captured once at mount — light tick marks showing where auto-detection put its
+  // boundaries, kept visible even after the user starts editing, as a reference
+  // point for "here's where the auto shot-cut was detected."
+  const [autoBoundaries] = useState(() => initialSegments.slice(0, -1).map((s) => s.end));
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+
+  const updateFrac = (i, frac) => {
+    setSegments((prev) => prev.map((s, idx) => (idx === i ? { ...s, crop_center_frac: frac } : s)));
+  };
+
+  const splitSegment = (i) => {
+    setSegments((prev) => {
+      const seg = prev[i];
+      const mid = (seg.start + seg.end) / 2;
+      if (mid - seg.start < 0.2 || seg.end - mid < 0.2) return prev; // too short to split further
+      const first = { ...seg, end: mid };
+      const second = { ...seg, start: mid };
+      return [...prev.slice(0, i), first, second, ...prev.slice(i + 1)];
+    });
+  };
+
+  const mergeWithNext = (i) => {
+    setSegments((prev) => {
+      if (i >= prev.length - 1) return prev;
+      const merged = { ...prev[i], end: prev[i + 1].end };
+      return [...prev.slice(0, i), merged, ...prev.slice(i + 2)];
+    });
+  };
+
+  const moveBoundary = (i, value) => {
+    // Boundary i sits between segment i and segment i+1 — dragging it resizes both.
+    setSegments((prev) => {
+      const lo = prev[i].start + 0.2;
+      const hi = prev[i + 1].end - 0.2;
+      const v = Math.min(Math.max(Number(value), lo), hi);
+      return prev.map((s, idx) => {
+        if (idx === i) return { ...s, end: v };
+        if (idx === i + 1) return { ...s, start: v };
+        return s;
+      });
+    });
+  };
 
   const handleApply = async () => {
     setSaving(true);
     setErr("");
     try {
-      const res = await fetch(`${API}/api/clips/${jobId}/${clip.index}/reposition`, {
+      const res = await fetch(`${API}/api/clips/${jobId}/${clip.index}/crop-segments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ crop_center_frac: Number(frac) }),
+        body: JSON.stringify({ segments }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -537,20 +593,68 @@ function CropEditor({ jobId, clip, onApplied }) {
 
   return (
     <div className="trim-editor">
-      <label>
-        Crop position (pan left/right): {(frac * 100).toFixed(0)}%
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={frac}
-          onChange={(e) => setFrac(Number(e.target.value))}
-        />
-      </label>
+      <p className="clip-meta">
+        {segments.length > 1
+          ? `This clip spans ${segments.length} detected framing(s) — each gets its own crop position below.`
+          : "One framing detected for this whole clip."}
+      </p>
+
+      <div className="segment-timeline">
+        {segments.map((s, i) => (
+          <div
+            key={i}
+            className="segment-block"
+            style={{ width: `${((s.end - s.start) / duration) * 100}%` }}
+          />
+        ))}
+        {autoBoundaries.map((b, i) => (
+          <div key={i} className="segment-tick" style={{ left: `${(b / duration) * 100}%` }} />
+        ))}
+      </div>
+
+      {segments.map((seg, i) => (
+        <div key={i} className="segment-row">
+          <label>
+            Segment {i + 1}: {seg.start.toFixed(1)}s – {seg.end.toFixed(1)}s — pan{" "}
+            {(seg.crop_center_frac * 100).toFixed(0)}%
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={seg.crop_center_frac}
+              onChange={(e) => updateFrac(i, Number(e.target.value))}
+            />
+          </label>
+          {i < segments.length - 1 && (
+            <label>
+              Boundary after this segment: {seg.end.toFixed(1)}s
+              <input
+                type="range"
+                min={seg.start + 0.2}
+                max={segments[i + 1].end - 0.2}
+                step={0.1}
+                value={seg.end}
+                onChange={(e) => moveBoundary(i, e.target.value)}
+              />
+            </label>
+          )}
+          <div className="row">
+            <button type="button" onClick={() => splitSegment(i)}>
+              Split this segment
+            </button>
+            {i < segments.length - 1 && (
+              <button type="button" onClick={() => mergeWithNext(i)}>
+                Merge with next
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+
       {err && <p className="error">{err}</p>}
       <button className="primary" onClick={handleApply} disabled={saving}>
-        {saving ? "Re-rendering..." : "Apply crop position"}
+        {saving ? "Re-rendering..." : "Apply crop segments"}
       </button>
     </div>
   );
@@ -659,7 +763,7 @@ function ClipCard({ jobId, clip, sourceDuration, onClipUpdated }) {
           {panel === "trim" ? "Cancel" : "Edit duration"}
         </button>
         <button onClick={() => togglePanel("crop")}>
-          {panel === "crop" ? "Cancel" : "Reposition crop"}
+          {panel === "crop" ? "Cancel" : "Adjust crop"}
         </button>
         <button onClick={() => togglePanel("captions")}>
           {panel === "captions" ? "Cancel" : "Edit captions"}
@@ -687,6 +791,7 @@ function App() {
   const [errorMsg, setErrorMsg] = useState("");
   const [sourceDuration, setSourceDuration] = useState(null);
   const pollRef = useRef(null);
+  const videoReadyFetchedRef = useRef(false);
 
   const resetForNewJob = () => {
     setErrorMsg("");
@@ -697,6 +802,7 @@ function App() {
     setDownloadPercent(0);
     setRenderProgress(null);
     setHighlightMarkers([]);
+    videoReadyFetchedRef.current = false;
   };
 
   const submitJob = async (payload) => {
@@ -755,7 +861,14 @@ function App() {
         if (data.highlight_markers) setHighlightMarkers(data.highlight_markers);
         if (data.clips) setClips(data.clips);
 
-        if (data.video_ready && !videoReady) {
+        // Use a ref, not the videoReady state, as the "already fetched" guard —
+        // this closure is created once per jobId (the effect below only depends
+        // on [jobId]) so a captured state value stays stale on every subsequent
+        // poll tick. With state, that stale `false` caused source-duration to be
+        // re-fetched on every single 2s poll for the rest of the job instead of
+        // once (confirmed via repeated requests in the network log).
+        if (data.video_ready && !videoReadyFetchedRef.current) {
+          videoReadyFetchedRef.current = true;
           setVideoReady(true);
           fetch(`${API}/api/source-duration/${jobId}`)
             .then((r) => r.json())
@@ -855,22 +968,44 @@ function App() {
   );
 }
 
+function formatBytes(bytes) {
+  if (!bytes) return "0 MB";
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function MaintenancePanel() {
+  const [stats, setStats] = useState(null);
   const [result, setResult] = useState(null);
   const [running, setRunning] = useState(false);
+  const [includeToday, setIncludeToday] = useState(false);
   const [err, setErr] = useState("");
+
+  const loadStats = () => {
+    fetch(`${API}/api/maintenance/stats`)
+      .then((r) => r.json())
+      .then(setStats)
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    loadStats();
+  }, []);
 
   const handleCleanup = async () => {
     setRunning(true);
     setErr("");
     setResult(null);
     try {
-      const res = await fetch(`${API}/api/maintenance/cleanup`, { method: "POST" });
+      const maxAge = includeToday ? 0 : 24;
+      const res = await fetch(`${API}/api/maintenance/cleanup?max_age_hours=${maxAge}`, {
+        method: "POST",
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail || `Request failed (${res.status})`);
       }
       setResult(await res.json());
+      loadStats();
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -880,10 +1015,27 @@ function MaintenancePanel() {
 
   return (
     <div className="card maintenance-panel">
-      <p className="clip-meta">
-        Downloaded videos and rendered clips older than 24h are cleaned up automatically.
-        You can also trigger it manually:
-      </p>
+      {stats ? (
+        <p className="clip-meta">
+          Currently stored: {stats.source_videos.count} source video(s) (
+          {formatBytes(stats.source_videos.bytes)}), {stats.rendered_clips.count} rendered clip(s) (
+          {formatBytes(stats.rendered_clips.bytes)}), {stats.quarantined_failed.count} quarantined
+          failed clip(s) ({formatBytes(stats.quarantined_failed.bytes)}). Files older than 24h are
+          cleaned up automatically.
+        </p>
+      ) : (
+        <p className="clip-meta">Loading storage stats...</p>
+      )}
+
+      <label className="row" style={{ alignItems: "center", fontSize: 13 }}>
+        <input
+          type="checkbox"
+          checked={includeToday}
+          onChange={(e) => setIncludeToday(e.target.checked)}
+        />
+        Include today's files too (force clean everything now)
+      </label>
+
       <button onClick={handleCleanup} disabled={running}>
         {running ? "Cleaning up..." : "Clean up old files now"}
       </button>

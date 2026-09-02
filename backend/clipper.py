@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tempfile
 
-from face_crop import compute_crop_x
+from face_crop import compute_crop_x, compute_crop_segments
 from captions import build_ass_plain, get_caption_lines
 
 # ffmpeg-full (built with libass, for burned-in subtitles) is keg-only on Homebrew;
@@ -29,44 +29,116 @@ def get_video_dimensions(path: str) -> tuple:
     return int(w), int(h)
 
 
+def _encode_segment(source_path, abs_start, abs_end, crop_filter, output_path, extra_vf=None):
+    vf = f"{crop_filter},{extra_vf}" if extra_vf else crop_filter
+    cmd = [
+        FFMPEG_BIN, "-y",
+        "-ss", str(abs_start), "-to", str(abs_end),
+        "-i", source_path,
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "128k",
+        output_path,
+    ]
+    subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+
 def make_clip(source_path: str, start: float, end: float, words, output_path: str,
-              crop_center_frac: float = None, caption_lines: list = None) -> dict:
-    """Cut/crop/caption a clip. Returns {"path", "crop_center_frac", "caption_lines"}
-    reflecting what was actually used — either the caller's manual override, or the
-    auto-detected face position / auto-derived caption lines, so the caller (api.py)
-    can persist these for later re-render (reposition/caption-edit endpoints).
+              crop_center_frac: float = None, caption_lines: list = None,
+              crop_segments: list = None) -> dict:
+    """Cut/crop/caption a clip. Returns {"path", "crop_center_frac", "crop_segments",
+    "caption_lines"} reflecting what was actually used — either the caller's manual
+    override, or the auto-detected face position(s) / auto-derived caption lines, so
+    the caller (api.py) can persist these for later re-render (reposition/segment/
+    caption-edit endpoints).
+
+    crop_segments (clip-relative {"start", "end", "crop_center_frac"} dicts) lets a
+    single clip use a different crop position across different sub-ranges — needed
+    because a clip can span more than one hard cut in a multicam-edited source video,
+    where no single static crop position is correct throughout. If not given, one is
+    computed: crop_center_frac (a single manual override) collapses to one segment
+    covering the whole clip; otherwise shot boundaries are auto-detected and each
+    resulting sub-range gets its own auto-computed position (see
+    face_crop.compute_crop_segments) — a clip with no detected cuts naturally comes
+    back as a single segment, identical to the original single-crop behavior.
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     width, height = get_video_dimensions(source_path)
-
-    # Face-tracked crop to 9:16 (falls back to center-crop if no face found, or to
-    # a manual override if the caller supplied one), then scale to 1080x1920.
     target_w = int(height * 9 / 16)
-    crop_x = compute_crop_x(source_path, start, end, width, target_w, manual_center_x=crop_center_frac)
-    used_crop_frac = crop_center_frac if crop_center_frac is not None else (crop_x + target_w / 2) / width
-    crop_filter = f"crop={target_w}:{height}:{crop_x}:0,scale=1080:1920"
 
     if caption_lines is None:
         clip_words = [w for w in words if w.start >= start and w.end <= end + 0.5]
         caption_lines = get_caption_lines(clip_words, start)
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".ass", delete=False) as f:
-        f.write(build_ass_plain(caption_lines))
-        ass_path = f.name
+    if crop_segments is None:
+        if crop_center_frac is not None:
+            crop_segments = [{"start": 0.0, "end": end - start, "crop_center_frac": crop_center_frac}]
+        else:
+            crop_segments = compute_crop_segments(source_path, start, end, width, target_w)
 
-    try:
-        vf = f"{crop_filter},subtitles=filename={ass_path}"
-        cmd = [
-            FFMPEG_BIN, "-y",
-            "-ss", str(start), "-to", str(end),
-            "-i", source_path,
-            "-vf", vf,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "128k",
-            output_path,
-        ]
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
-    finally:
-        os.unlink(ass_path)
+    if len(crop_segments) == 1:
+        # Fast path — one crop position for the whole clip (no detected cuts, or a
+        # manual single-position override): identical to the original single-pass
+        # behavior, no extra encode/concat overhead.
+        seg = crop_segments[0]
+        crop_x = compute_crop_x(source_path, start, end, width, target_w, manual_center_x=seg["crop_center_frac"])
+        crop_filter = f"crop={target_w}:{height}:{crop_x}:0,scale=1080:1920"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".ass", delete=False) as f:
+            f.write(build_ass_plain(caption_lines))
+            ass_path = f.name
+        try:
+            _encode_segment(source_path, start, end, crop_filter, output_path,
+                             extra_vf=f"subtitles=filename={ass_path}")
+        finally:
+            os.unlink(ass_path)
+    else:
+        # Multiple crop positions across the clip's timeline: encode each segment
+        # with its own crop, concat them back together, then burn captions in one
+        # final pass over the concatenated result (captions are already
+        # clip-relative, so their timing stays correct across the concatenation).
+        temp_dir = tempfile.mkdtemp(prefix="clipper_seg_")
+        try:
+            seg_paths = []
+            for i, seg in enumerate(crop_segments):
+                abs_s, abs_e = start + seg["start"], start + seg["end"]
+                crop_x = compute_crop_x(source_path, abs_s, abs_e, width, target_w,
+                                         manual_center_x=seg["crop_center_frac"])
+                crop_filter = f"crop={target_w}:{height}:{crop_x}:0,scale=1080:1920"
+                seg_path = os.path.join(temp_dir, f"seg{i}.mp4")
+                _encode_segment(source_path, abs_s, abs_e, crop_filter, seg_path)
+                seg_paths.append(seg_path)
 
-    return {"path": output_path, "crop_center_frac": used_crop_frac, "caption_lines": caption_lines}
+            concat_list_path = os.path.join(temp_dir, "concat_list.txt")
+            with open(concat_list_path, "w") as f:
+                for p in seg_paths:
+                    f.write(f"file '{p}'\n")
+            merged_path = os.path.join(temp_dir, "merged.mp4")
+            subprocess.run(
+                [FFMPEG_BIN, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
+                 "-c", "copy", merged_path],
+                capture_output=True, text=True, check=True,
+            )
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".ass", delete=False) as f:
+                f.write(build_ass_plain(caption_lines))
+                ass_path = f.name
+            try:
+                cmd = [
+                    FFMPEG_BIN, "-y", "-i", merged_path,
+                    "-vf", f"subtitles=filename={ass_path}",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                    "-c:a", "aac", "-b:a", "128k",
+                    output_path,
+                ]
+                subprocess.run(cmd, capture_output=True, text=True, check=True)
+            finally:
+                os.unlink(ass_path)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return {
+        "path": output_path,
+        "crop_center_frac": crop_segments[0]["crop_center_frac"],
+        "crop_segments": crop_segments,
+        "caption_lines": caption_lines,
+    }

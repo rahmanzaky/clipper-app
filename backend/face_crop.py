@@ -87,6 +87,150 @@ def _largest_cluster_mean(centers: list, frame_width: int, threshold_frac: float
     return sum(best) / len(best)
 
 
+def detect_shot_boundaries(video_path: str, start: float, end: float,
+                            sample_interval: float = 1.0, min_run_samples: int = 3) -> list:
+    """Find framing-change timestamps within [start, end] by sampling face presence
+    (reusing the same Haar cascade as find_face_center_x) at a regular interval and
+    flagging sustained transitions between "a face is visible" and "no face is
+    visible."
+
+    Two other approaches were tried first and rejected, calibrated against real
+    footage rather than assumed to work:
+    - Raw grayscale pixel-difference: flagged 7 false boundaries on a real
+      continuous handheld-camera clip with zero actual cuts — ordinary camera
+      motion shifts enough pixels to look like a cut.
+    - HSV color-histogram correlation: correctly ignored that same motion, but on
+      a real problem clip (a two-camera podcast cut between a wide two-shot and a
+      speaker close-up) it never dropped below 0.97 correlation anywhere — the
+      wide shot and the close-up share the same studio lighting/backdrop/skin
+      tones, so the overall color palette barely changes even though the framing
+      is completely different. Color alone can't see a same-set camera-angle cut.
+
+    Directly sampling face presence doesn't share that blind spot: this exact
+    problem clip has a real 4-second stretch with *no* face detected at all (a
+    wide two-shot) followed by a stretch where a face is consistently detected (a
+    close-up) — a presence-based comparison catches that transition where
+    color-based comparison couldn't.
+
+    Raw per-sample presence is noisy on its own, though — a real continuous shot
+    of someone moving/turning naturally produces occasional single-sample "no
+    face" blips that are not real cuts (confirmed: naive sample-to-sample
+    comparison, even with a lookahead debounce, still produced several false
+    boundaries on both real calibration clips). This is handled by run-length
+    smoothing: raw presence is collapsed into runs, and any run shorter than
+    min_run_samples is discarded (absorbed into whichever state came before it) —
+    a real segment (wide shot or close-up) lasts several seconds, so this removes
+    detector flicker without erasing genuine transitions.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    detector = _get_detector()
+    duration = max(end - start, 0.1)
+    num_samples = max(1, int(duration / sample_interval))
+
+    samples = []  # (t, has_face)
+    for i in range(num_samples + 1):
+        t = start + i * sample_interval
+        if t > end:
+            break
+        frame_idx = int(t * fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+        samples.append((t, len(faces) > 0))
+    cap.release()
+
+    return _boundaries_from_presence_samples(samples, min_run_samples)
+
+
+def _boundaries_from_presence_samples(samples: list, min_run_samples: int = 3) -> list:
+    """Pure run-length-smoothing logic behind detect_shot_boundaries, split out so
+    it can be unit-tested against synthetic (t, has_face) sequences directly,
+    without needing a real video file or a mocked cv2.VideoCapture.
+
+    Collapses raw presence samples into runs, drops any run shorter than
+    min_run_samples by absorbing it into the previous run (a lone detector blip
+    vanishes instead of creating a spurious boundary), and returns the start time
+    of every run after the first.
+    """
+    if len(samples) < 2:
+        return []
+
+    runs = []  # [has_face, start_idx, end_idx]
+    cur_state, run_start = samples[0][1], 0
+    for i in range(1, len(samples)):
+        if samples[i][1] != cur_state:
+            runs.append([cur_state, run_start, i - 1])
+            cur_state, run_start = samples[i][1], i
+    runs.append([cur_state, run_start, len(samples) - 1])
+
+    cleaned = []
+    for run in runs:
+        length = run[2] - run[1] + 1
+        if length < min_run_samples and cleaned:
+            cleaned[-1][2] = run[2]  # absorb this blip into the previous run
+        else:
+            cleaned.append(list(run))
+    # A second pass in case absorbing blips left adjacent runs with the same state.
+    final_runs = []
+    for run in cleaned:
+        if final_runs and final_runs[-1][0] == run[0]:
+            final_runs[-1][2] = run[2]
+        else:
+            final_runs.append(run)
+
+    return [samples[run[1]][0] for run in final_runs[1:]]
+
+
+def compute_crop_segments(video_path: str, start: float, end: float, source_width: int,
+                           target_width: int, manual_segments: list = None) -> list:
+    """Return a list of {"start", "end", "crop_center_frac"} dicts (clip-relative
+    seconds, i.e. 0..duration) describing the crop to use across the clip's timeline.
+
+    If manual_segments is given (from the frontend's segment editor), it's returned
+    as-is — the caller has already validated it covers [0, duration] with no gaps.
+    Otherwise, shot boundaries are auto-detected and each resulting sub-range gets
+    its own auto-computed crop position (reusing compute_crop_x's existing face
+    detection + clustering, just scoped to that sub-range instead of the whole
+    clip). Zero detected cuts collapses to a single segment covering the whole
+    clip — identical to the pre-existing single-crop behavior, at the cost of one
+    cheap boundary-detection pass.
+    """
+    if manual_segments is not None:
+        return manual_segments
+
+    boundaries = detect_shot_boundaries(video_path, start, end)
+    bounds = [start] + sorted(boundaries) + [end]
+    segments = []
+    for seg_start, seg_end in zip(bounds[:-1], bounds[1:]):
+        if seg_end - seg_start < 0.05:
+            continue  # boundary landed right at a segment edge — skip a near-zero sliver
+        crop_x = compute_crop_x(video_path, seg_start, seg_end, source_width, target_width)
+        crop_center_frac = (crop_x + target_width / 2) / source_width
+        segments.append({
+            "start": seg_start - start,
+            "end": seg_end - start,
+            "crop_center_frac": crop_center_frac,
+        })
+    if not segments:
+        # Every candidate sub-range was a sliver (pathological/very short clip) —
+        # fall back to one segment covering the whole clip rather than returning
+        # nothing.
+        crop_x = compute_crop_x(video_path, start, end, source_width, target_width)
+        segments = [{
+            "start": 0.0,
+            "end": end - start,
+            "crop_center_frac": (crop_x + target_width / 2) / source_width,
+        }]
+    return segments
+
+
 def compute_crop_x(video_path: str, start: float, end: float, source_width: int, target_width: int,
                     manual_center_x: float = None) -> int:
     """Return the left-edge x-coordinate for a target_width-wide crop, centered on
