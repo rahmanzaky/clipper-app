@@ -97,6 +97,36 @@ code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/api/clips/$job/9
 check "POST trim on nonexistent clip -> 404" "404" "$code"
 
 echo
+echo "== Validation edge cases =="
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/api/clips/$job/0/trim" \
+  -H "Content-Type: application/json" -d '{"start":8,"end":1}')
+check "POST trim with end<=start -> 400" "400" "$code"
+
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/api/clips/$job/0/reposition" \
+  -H "Content-Type: application/json" -d '{"crop_center_frac":1.5}')
+check "POST reposition with out-of-range frac -> 400" "400" "$code"
+
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/api/clips/$job/0/crop-segments" \
+  -H "Content-Type: application/json" -d '{"segments":[{"start":0,"end":3,"crop_center_frac":0.5},{"start":5,"end":8,"crop_center_frac":0.5}]}')
+check "POST crop-segments with a gap -> 400" "400" "$code"
+
+code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/api/jobs/$job/manual-clip" \
+  -H "Content-Type: application/json" -d '{"start":6,"end":1}')
+check "POST manual-clip with end<=start -> 400" "400" "$code"
+
+code=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL/api/video/clip/..%2F..%2Fetc%2Fpasswd")
+if [ "$code" = "400" ] || [ "$code" = "404" ]; then
+  echo "  OK   GET clip video path traversal rejected (got $code)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL GET clip video path traversal rejected (got $code, expected 400 or 404)"
+  FAIL=$((FAIL + 1))
+fi
+
+code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API_URL/api/profiles/_definitely_not_a_real_profile")
+check "DELETE nonexistent profile -> 404" "404" "$code"
+
+echo
 echo "== Download all =="
 code=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL/api/jobs/$job/download-all")
 check "GET download-all" "200" "$code"
