@@ -173,6 +173,11 @@ def _run_pipeline(job_id: str, req: ProcessRequest, local_video_path: str = None
     )
     job["profile"] = profile
     use_groq = bool(os.environ.get("GROQ_API_KEY"))
+    # Surfaced to the frontend so the user can tell whether they're getting
+    # LLM-based paraphrase-aware detection or the weaker keyword-only fallback —
+    # previously silent, so a missing/failing Groq key degraded quality with zero
+    # visible indication of why.
+    job["detection_mode"] = "groq" if use_groq else "keyword"
 
     try:
         if local_video_path is None:
@@ -432,6 +437,8 @@ def get_job(job_id: str):
     if job is None:
         raise HTTPException(404, "Job not found")
     response = {"stage": job["stage"], "video_ready": job.get("video_ready", False)}
+    if job.get("detection_mode"):
+        response["detection_mode"] = job["detection_mode"]
     if "download_percent" in job:
         response["download_percent"] = job["download_percent"]
     if job.get("highlight_markers"):
