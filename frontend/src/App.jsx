@@ -1224,6 +1224,12 @@ function App() {
         </div>
       )}
 
+      {clips.length > 1 && (
+        <a href={`${API}/api/jobs/${jobId}/download-all`} className="button-like" style={{ marginBottom: 12 }}>
+          Download all {clips.length} clips (.zip)
+        </a>
+      )}
+
       {clips.length > 0 && (
         <div className="clips-grid">
           {clips.map((clip) => (
