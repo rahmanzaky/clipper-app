@@ -687,12 +687,21 @@ def manual_clip(job_id: str, req: ManualClipRequest):
     return clip
 
 
+# Clip files are re-rendered in place under the same filename after every edit
+# (trim/reposition/crop-segments/captions) — without an explicit no-store header,
+# Safari's media cache layer (which is documented to be more aggressive than its
+# regular HTTP disk cache for <video> sources) can keep serving the pre-edit bytes
+# for the same URL path even when a "?v=" cache-busting query param changes,
+# making an edit look like it silently didn't take effect.
+_NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+
+
 @app.get("/api/video/source/{job_id}")
 def get_source_video(job_id: str):
     job = JOBS.get(job_id)
     if job is None or "video_path" not in job:
         raise HTTPException(404, "Source video not available")
-    return FileResponse(job["video_path"], media_type="video/mp4")
+    return FileResponse(job["video_path"], media_type="video/mp4", headers=_NO_CACHE_HEADERS)
 
 
 @app.get("/api/video/clip/{filename}")
@@ -704,7 +713,7 @@ def get_clip_video(filename: str):
     path = os.path.join(OUTPUT_DIR, filename)
     if not os.path.exists(path):
         raise HTTPException(404, "Clip not found")
-    return FileResponse(path, media_type="video/mp4")
+    return FileResponse(path, media_type="video/mp4", headers=_NO_CACHE_HEADERS)
 
 
 @app.get("/api/source-duration/{job_id}")
