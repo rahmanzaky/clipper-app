@@ -780,8 +780,13 @@ def get_source_duration(job_id: str):
     out = subprocess.run(
         [FFPROBE_BIN, "-v", "error", "-show_entries", "format=duration",
          "-of", "csv=p=0", job["video_path"]],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True,
     )
+    if out.returncode != 0:
+        # Previously an unhandled CalledProcessError here (bare 500 with no
+        # useful message, and stderr silently discarded) — same class of bug
+        # fixed in clipper.py's _run() this same pass.
+        raise HTTPException(500, f"ffprobe failed: {out.stderr.strip()[-300:]}")
     return {"duration": float(out.stdout.strip())}
 
 

@@ -19,11 +19,27 @@ FFPROBE_FULL = "/opt/homebrew/opt/ffmpeg-full/bin/ffprobe"
 FFPROBE_BIN = FFPROBE_FULL if os.path.exists(FFPROBE_FULL) else shutil.which("ffprobe") or "ffprobe"
 
 
+def _run(cmd: list):
+    """subprocess.run wrapper for ffmpeg/ffprobe calls that actually surfaces the
+    real failure reason. subprocess.CalledProcessError's default string form is
+    just "Command [...] returned non-zero exit status N" — the actual diagnostic
+    info (e.g. "No such file or directory", a bad filter graph, a codec error) is
+    sitting right there in .stderr but silently discarded by every caller that
+    just lets the CalledProcessError propagate as-is (confirmed: every "Re-render
+    failed" message surfaced by the API has been this useless generic string,
+    never the real ffmpeg error, for as long as this project has had a web UI).
+    """
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        stderr_tail = "\n".join(result.stderr.strip().splitlines()[-6:])
+        raise RuntimeError(f"{os.path.basename(cmd[0])} failed (exit {result.returncode}):\n{stderr_tail}")
+    return result
+
+
 def get_video_dimensions(path: str) -> tuple:
-    out = subprocess.run(
+    out = _run(
         [FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", path],
-        capture_output=True, text=True, check=True,
+         "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", path]
     )
     w, h = out.stdout.strip().split("x")
     return int(w), int(h)
@@ -40,7 +56,7 @@ def _encode_segment(source_path, abs_start, abs_end, crop_filter, output_path, e
         "-c:a", "aac", "-b:a", "128k",
         output_path,
     ]
-    subprocess.run(cmd, capture_output=True, text=True, check=True)
+    _run(cmd)
 
 
 def make_clip(source_path: str, start: float, end: float, words, output_path: str,
@@ -113,11 +129,8 @@ def make_clip(source_path: str, start: float, end: float, words, output_path: st
                 for p in seg_paths:
                     f.write(f"file '{p}'\n")
             merged_path = os.path.join(temp_dir, "merged.mp4")
-            subprocess.run(
-                [FFMPEG_BIN, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
-                 "-c", "copy", merged_path],
-                capture_output=True, text=True, check=True,
-            )
+            _run([FFMPEG_BIN, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
+                  "-c", "copy", merged_path])
 
             with tempfile.NamedTemporaryFile(mode="w", suffix=".ass", delete=False) as f:
                 f.write(build_ass_plain(caption_lines))
@@ -130,7 +143,7 @@ def make_clip(source_path: str, start: float, end: float, words, output_path: st
                     "-c:a", "aac", "-b:a", "128k",
                     output_path,
                 ]
-                subprocess.run(cmd, capture_output=True, text=True, check=True)
+                _run(cmd)
             finally:
                 os.unlink(ass_path)
         finally:
