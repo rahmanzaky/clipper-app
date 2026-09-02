@@ -20,6 +20,26 @@ function formatTime(seconds, decimals = 1) {
   return h > 0 ? `${h}:${mStr}:${secStr}` : `${mStr}:${secStr}`;
 }
 
+// A render-triggering request (trim/reposition/crop-segments/captions/manual-clip)
+// has no client-side timeout otherwise — if ffmpeg ever genuinely hangs (a corrupt
+// input, a stuck process), the UI would show its "Re-rendering..." spinner forever
+// with no way out. 120s is generous enough not to false-positive on a legitimately
+// slow multi-segment render.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 120000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s — the server may be stuck.`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function ProcessForm({ onSubmit, onUpload, disabled }) {
   const [mode, setMode] = useState("url"); // "url" | "upload"
   const [url, setUrl] = useState("");
@@ -388,7 +408,7 @@ function VideoTimeline({ jobId, sourceDuration, highlightMarkers, detectionMode,
     setCreating(true);
     setErr("");
     try {
-      const res = await fetch(`${API}/api/jobs/${jobId}/manual-clip`, {
+      const res = await fetchWithTimeout(`${API}/api/jobs/${jobId}/manual-clip`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ start: Number(rangeStart), end: Number(rangeEnd) }),
@@ -523,7 +543,7 @@ function TrimEditor({ jobId, clip, sourceDuration, onApplied }) {
     setSaving(true);
     setErr("");
     try {
-      const res = await fetch(`${API}/api/clips/${jobId}/${clip.index}/trim`, {
+      const res = await fetchWithTimeout(`${API}/api/clips/${jobId}/${clip.index}/trim`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ start: Number(start), end: Number(end) }),
@@ -698,7 +718,7 @@ function CropEditor({ jobId, clip, onApplied }) {
     setSaving(true);
     setErr("");
     try {
-      const res = await fetch(`${API}/api/clips/${jobId}/${clip.index}/crop-segments`, {
+      const res = await fetchWithTimeout(`${API}/api/clips/${jobId}/${clip.index}/crop-segments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ segments }),
@@ -857,7 +877,7 @@ function CaptionEditor({ jobId, clip, onApplied }) {
     setSaving(true);
     setErr("");
     try {
-      const res = await fetch(`${API}/api/clips/${jobId}/${clip.index}/captions`, {
+      const res = await fetchWithTimeout(`${API}/api/clips/${jobId}/${clip.index}/captions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lines }),
