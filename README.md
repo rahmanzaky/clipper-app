@@ -53,8 +53,8 @@ Two processes: the backend API and the frontend dev server.
 ```bash
 # Backend
 cd backend
-source ../venv/bin/activate          # see Setup below if this doesn't exist yet
-HF_HUB_DISABLE_XET=1 WHISPER_MODEL=small uvicorn api:app --host 127.0.0.1 --port 8000
+./scripts/dev_server.sh              # fast iteration (small Whisper model)
+# FAST=0 ./scripts/dev_server.sh      # real accuracy (large-v3-turbo, slower)
 ```
 
 ```bash
@@ -64,9 +64,11 @@ npm install                          # first time only
 npm run dev
 ```
 
-Then open **http://localhost:5173**. `WHISPER_MODEL=small` above is for fast local
-iteration — drop it (or set `WHISPER_MODEL=large-v3-turbo`, the default) for real
-campaign submissions where bilingual transcription accuracy matters more than speed.
+Then open **http://localhost:5173**. `dev_server.sh` defaults to the `small`
+Whisper model for fast local iteration; use `FAST=0` for real campaign submissions
+where bilingual transcription accuracy matters more than speed (equivalent to
+`HF_HUB_DISABLE_XET=1 uvicorn api:app --host 127.0.0.1 --port 8000` directly, if you'd
+rather not use the script).
 
 **Job state lives in memory only** — restarting the backend loses all in-progress
 and completed jobs (their rendered files on disk are cleaned up automatically after
