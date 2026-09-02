@@ -24,6 +24,7 @@ function ProcessForm({ onSubmit, onUpload, disabled }) {
   const [mode, setMode] = useState("url"); // "url" | "upload"
   const [url, setUrl] = useState("");
   const [file, setFile] = useState(null);
+  const [dragOver, setDragOver] = useState(false);
   const [topics, setTopics] = useState("");
   const [minDuration, setMinDuration] = useState(8);
   const [maxDuration, setMaxDuration] = useState(60);
@@ -193,12 +194,33 @@ function ProcessForm({ onSubmit, onUpload, disabled }) {
       ) : (
         <label>
           Video file
-          <input
-            type="file"
-            accept="video/*"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-            disabled={disabled}
-          />
+          <div
+            className={"dropzone" + (dragOver ? " dragover" : "")}
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (!disabled) setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              if (disabled) return;
+              const dropped = e.dataTransfer.files?.[0];
+              if (dropped) setFile(dropped);
+            }}
+          >
+            {file ? file.name : "Drag a video file here, or click to choose one"}
+            {/* Nested inside the <label> — native label-click-forwarding already
+                opens this picker on click, so no separate onClick is needed here
+                (adding one would double-trigger the file dialog). */}
+            <input
+              type="file"
+              accept="video/*"
+              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              disabled={disabled}
+              style={{ display: "none" }}
+            />
+          </div>
         </label>
       )}
 
@@ -844,11 +866,14 @@ function ScoreGauge({ score }) {
 function ClipCard({ jobId, clip, sourceDuration, onClipUpdated }) {
   const [panel, setPanel] = useState(null); // null | "trim" | "crop" | "captions"
   const [cacheBust, setCacheBust] = useState(0);
+  const [justApplied, setJustApplied] = useState(false);
 
   const handleApplied = (data) => {
     onClipUpdated(data);
     setCacheBust((n) => n + 1);
     setPanel(null);
+    setJustApplied(true);
+    setTimeout(() => setJustApplied(false), 3000);
   };
 
   const togglePanel = (name) => setPanel((p) => (p === name ? null : name));
@@ -878,6 +903,8 @@ function ClipCard({ jobId, clip, sourceDuration, onClipUpdated }) {
           ))}
         </ul>
       )}
+
+      {justApplied && <span className="toast">Applied — clip re-rendered</span>}
 
       <video
         key={cacheBust}
@@ -1076,7 +1103,7 @@ function App() {
     <div className="app">
       <div className="app-header">
         <div className="app-logo">
-          <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>
         </div>
         <div className="app-title-group">
           <h1>Auto Video Clipper</h1>
