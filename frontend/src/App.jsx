@@ -261,6 +261,7 @@ function ProcessForm({ onSubmit, onUpload, disabled }) {
       {error && <p className="error">{error}</p>}
 
       <button type="submit" className="primary" disabled={disabled}>
+        {disabled && <span className="spinner" />}
         {disabled ? "Processing..." : "Process video"}
       </button>
     </form>
@@ -437,6 +438,7 @@ function VideoTimeline({ jobId, sourceDuration, highlightMarkers, onManualClip }
       </div>
       {err && <p className="error">{err}</p>}
       <button className="primary" onClick={handleCreate} disabled={creating}>
+        {creating && <span className="spinner" />}
         {creating ? "Creating clip..." : "Create clip now"}
       </button>
     </div>
@@ -530,6 +532,7 @@ function TrimEditor({ jobId, clip, sourceDuration, onApplied }) {
       <p className="duration-readout">Duration: {(end - start).toFixed(1)}s</p>
       {err && <p className="error">{err}</p>}
       <button className="primary" onClick={handleApply} disabled={saving}>
+        {saving && <span className="spinner" />}
         {saving ? "Re-rendering..." : "Apply trim"}
       </button>
     </div>
@@ -563,6 +566,26 @@ function CropEditor({ jobId, clip, onApplied }) {
       videoRef.current.currentTime = clip.start + (seg.start + seg.end) / 2;
     }
   };
+
+  // Number-key shortcuts to jump between segments — the same convention
+  // Premiere Pro and DaVinci Resolve use for switching multicam angles.
+  // Ignored while typing in a text field elsewhere on the page.
+  useEffect(() => {
+    const handleKey = (e) => {
+      // Range sliders are <input> too — only skip actual text-entry fields, so
+      // the shortcut still works right after dragging a segment's pan slider.
+      const tag = e.target.tagName;
+      const type = e.target.type;
+      if (tag === "TEXTAREA" || (tag === "INPUT" && type !== "range" && type !== "checkbox")) return;
+      const num = parseInt(e.key, 10);
+      if (!Number.isNaN(num) && num >= 1 && num <= segments.length) {
+        seekToSegment(num - 1);
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [segments]);
 
   const handleLoadedMetadata = (e) => {
     const { videoWidth, videoHeight } = e.target;
@@ -647,6 +670,11 @@ function CropEditor({ jobId, clip, onApplied }) {
         {segments.length > 1
           ? `This clip spans ${segments.length} detected framing(s) — each gets its own crop position below. Preview shows segment ${activeIndex + 1}.`
           : "One framing detected for this whole clip."}
+        {segments.length > 1 && (
+          <>
+            {" "}Press <span className="kbd-hint">1</span>–<span className="kbd-hint">{segments.length}</span> to jump between them.
+          </>
+        )}
       </p>
 
       <div className="crop-preview-wrap">
@@ -746,6 +774,7 @@ function CropEditor({ jobId, clip, onApplied }) {
 
       {err && <p className="error">{err}</p>}
       <button className="primary" onClick={handleApply} disabled={saving}>
+        {saving && <span className="spinner" />}
         {saving ? "Re-rendering..." : "Apply crop segments"}
       </button>
     </div>
@@ -794,9 +823,21 @@ function CaptionEditor({ jobId, clip, onApplied }) {
       ))}
       {err && <p className="error">{err}</p>}
       <button className="primary" onClick={handleApply} disabled={saving || lines.length === 0}>
+        {saving && <span className="spinner" />}
         {saving ? "Re-rendering..." : "Apply caption edits"}
       </button>
     </div>
+  );
+}
+
+function ScoreGauge({ score }) {
+  const pct = Math.max(0, Math.min(100, (score / 10) * 100));
+  return (
+    <span className="score-gauge" title={`Relevance score: ${score.toFixed(1)} / 10`}>
+      <span className="score-ring" style={{ "--score-pct": `${pct}%` }}>
+        {score.toFixed(1)}
+      </span>
+    </span>
   );
 }
 
@@ -819,13 +860,15 @@ function ClipCard({ jobId, clip, sourceDuration, onClipUpdated }) {
           Clip {clip.index + 1}
           {clip.manual && <span className="manual-tag">manual</span>}
         </h3>
-        <span className={"badge " + (clip.compliance.passed ? "pass" : "fail")}>
-          {clip.compliance.passed ? "PASS" : "FAIL"}
-        </span>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          {!!clip.score && <ScoreGauge score={clip.score} />}
+          <span className={"badge " + (clip.compliance.passed ? "pass" : "fail")}>
+            {clip.compliance.passed ? "PASS" : "FAIL"}
+          </span>
+        </div>
       </div>
       <p className="clip-meta">
         {formatTime(clip.start)} – {formatTime(clip.end)} ({clip.duration.toFixed(1)}s)
-        {clip.score ? ` · score ${clip.score.toFixed(1)}` : ""}
       </p>
       {clip.reason && <p className="clip-reason">{clip.reason}</p>}
       {clip.compliance.issues.length > 0 && (
@@ -1031,7 +1074,15 @@ function App() {
 
   return (
     <div className="app">
-      <h1>Auto Video Clipper</h1>
+      <div className="app-header">
+        <div className="app-logo">
+          <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+        </div>
+        <div className="app-title-group">
+          <h1>Auto Video Clipper</h1>
+          <p>Paste a video, get compliance-checked vertical clips out.</p>
+        </div>
+      </div>
       <ProcessForm onSubmit={submitJob} onUpload={submitUpload} disabled={isProcessing} />
 
       {stage && (
@@ -1158,6 +1209,7 @@ function MaintenancePanel() {
       </label>
 
       <button onClick={handleCleanup} disabled={running}>
+        {running && <span className="spinner" />}
         {running ? "Cleaning up..." : "Clean up old files now"}
       </button>
       {result && (

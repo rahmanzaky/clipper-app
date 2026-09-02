@@ -5,5 +5,11 @@
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #fafafa;
+  background: #f6f6fb;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #131318;
+  }
 }
