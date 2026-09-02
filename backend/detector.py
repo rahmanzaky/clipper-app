@@ -29,9 +29,14 @@ class Candidate:
     score: float = 0.0
 
 
-def _merge_segments(segments, hit_scores: dict, pad_before=2.0, pad_after=2.0):
+def _merge_segments(segments, hit_scores: dict, pad_before=2.0, pad_after=2.0, hit_whys: dict = None):
     """Merge adjacent/nearby hit segments into clip windows with padding.
     hit_scores maps segment index -> relevance score (higher = more relevant).
+    hit_whys, if given, maps segment index -> a short specific reason (from Groq)
+    for why that segment scored the way it did — used to give each resulting
+    candidate a real, specific reason instead of the same generic templated string
+    for every single Groq-detected clip in a job (confirmed as a real gap: two
+    completely different clips would both just say "LLM: relevant to <topics>").
     """
     if not hit_scores:
         return []
@@ -53,7 +58,15 @@ def _merge_segments(segments, hit_scores: dict, pad_before=2.0, pad_after=2.0):
         text = " ".join(segments[i].text for i in range(s_idx, e_idx + 1))
         window_scores = [hit_scores[i] for i in range(s_idx, e_idx + 1) if i in hit_scores]
         avg_score = sum(window_scores) / len(window_scores) if window_scores else 0.0
-        candidates.append(Candidate(start=start, end=end, text=text, reason="keyword match", score=avg_score))
+        reason = "keyword match"
+        if hit_whys:
+            # The highest-scoring segment's reason is the most representative one
+            # for the merged window as a whole.
+            in_window = [i for i in range(s_idx, e_idx + 1) if i in hit_scores]
+            if in_window:
+                best_idx = max(in_window, key=lambda i: hit_scores[i])
+                reason = hit_whys.get(best_idx, reason)
+        candidates.append(Candidate(start=start, end=end, text=text, reason=reason, score=avg_score))
     candidates.sort(key=lambda c: c.score, reverse=True)
     return candidates
 
@@ -89,7 +102,11 @@ BATCH_SIZE = 25  # segments per Groq call — a real 328-segment transcript (a ~
 
 
 def _score_batch(segments, index_offset, topics, api_key):
-    """Send one batch of segments to Groq, return {global_index: score}."""
+    """Send one batch of segments to Groq, return ({global_index: score},
+    {global_index: why}) — why is a short, specific reason for that segment's
+    score, so each resulting candidate can carry its own real explanation instead
+    of a single generic templated string shared by every candidate in the job.
+    """
     import requests
 
     numbered = "\n".join(f"[{i + index_offset}] {seg.text}" for i, seg in enumerate(segments))
@@ -97,9 +114,10 @@ def _score_batch(segments, index_offset, topics, api_key):
     prompt = (
         f"Below is a numbered transcript excerpt from a podcast. For each segment that "
         f"discusses or relates to: {topic_str} (including indirect references/paraphrases, "
-        f"not just literal mentions), give it a relevance score from 1-10. Return ONLY a "
-        f'JSON array of objects like [{{"index": 3, "score": 8}}], nothing else. Omit '
-        f"segments with no relevance.\n\nTranscript:\n{numbered}"
+        f"not just literal mentions), give it a relevance score from 1-10 and a short "
+        f'(under 12 words) specific reason why. Return ONLY a JSON array of objects like '
+        f'[{{"index": 3, "score": 8, "why": "explains the pricing model in detail"}}], '
+        f"nothing else. Omit segments with no relevance.\n\nTranscript:\n{numbered}"
     )
     resp = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
@@ -121,13 +139,16 @@ def _score_batch(segments, index_offset, topics, api_key):
         raise ValueError(f"No JSON array found in Groq response: {content[:200]!r}")
     parsed = json.loads(content[start:end + 1])
 
-    hit_scores = {}
+    hit_scores, hit_whys = {}, {}
     for item in parsed:
         idx = item.get("index")
         score = item.get("score", 5)
+        why = item.get("why")
         if isinstance(idx, int) and 0 <= idx < index_offset + len(segments):
             hit_scores[idx] = float(score)
-    return hit_scores
+            if why:
+                hit_whys[idx] = str(why).strip()
+    return hit_scores, hit_whys
 
 
 def detect_groq(segments, topics: list) -> list:
@@ -139,8 +160,7 @@ def detect_groq(segments, topics: list) -> list:
     if not api_key:
         raise RuntimeError("GROQ_API_KEY not set")
 
-    topic_str = ", ".join(topics) if topics else "anything funny, wise, or highlight-worthy"
-    hit_scores = {}
+    hit_scores, hit_whys = {}, {}
     num_batches = (len(segments) + BATCH_SIZE - 1) // BATCH_SIZE
     for batch_num, i in enumerate(range(0, len(segments), BATCH_SIZE)):
         batch = segments[i:i + BATCH_SIZE]
@@ -153,11 +173,12 @@ def detect_groq(segments, topics: list) -> list:
             # limits (429) confirmed during real testing need more than a couple
             # seconds to clear; a short backoff just burns retries against a limit
             # that hasn't reset yet.
-            batch_scores = retry_with_backoff(
+            batch_scores, batch_whys = retry_with_backoff(
                 lambda i=i, batch=batch: _score_batch(batch, i, topics, api_key),
                 attempts=3, base_delay=5.0, on_retry=on_retry,
             )
             hit_scores.update(batch_scores)
+            hit_whys.update(batch_whys)
         except Exception as e:
             # One batch permanently failing shouldn't sink the whole transcript's
             # detection — skip it (that stretch just gets no LLM-scored candidates)
@@ -173,9 +194,16 @@ def detect_groq(segments, topics: list) -> list:
     if not hit_scores:
         raise RuntimeError("Groq scored zero segments across all batches")
 
-    candidates = _merge_segments(segments, hit_scores)
+    candidates = _merge_segments(segments, hit_scores, hit_whys=hit_whys)
+    # Each candidate carries Groq's own specific "why" when available; fall back to
+    # a generic templated reason only where it isn't (an older-shaped response, or
+    # that segment's batch failed and got skipped) — every candidate previously got
+    # this same generic string unconditionally, even when a real, specific reason
+    # was sitting right there in the response and simply never being read.
+    topic_str = ", ".join(topics) if topics else "anything funny, wise, or highlight-worthy"
     for c in candidates:
-        c.reason = f"LLM: relevant to {topic_str}"
+        if c.reason == "keyword match":
+            c.reason = f"LLM: relevant to {topic_str}"
     return candidates
 
 

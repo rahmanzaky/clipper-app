@@ -203,10 +203,11 @@ def _run_pipeline(job_id: str, req: ProcessRequest, local_video_path: str = None
         segments = []
         buffer = []  # (index, segment) not yet scored
         hit_scores = {}
+        hit_whys = {}  # segment index -> Groq's specific reason for that score
         topics_lower = [t.lower() for t in req.topics if t.strip()]
 
         def refresh_markers():
-            candidates = _merge_segments(segments, hit_scores)
+            candidates = _merge_segments(segments, hit_scores, hit_whys=hit_whys)
             job["highlight_markers"] = [
                 {"start": c.start, "end": c.end, "score": c.score, "reason": c.reason}
                 for c in candidates
@@ -223,7 +224,9 @@ def _run_pipeline(job_id: str, req: ProcessRequest, local_video_path: str = None
                     offset = buffer[0][0]
                     batch_segs = [s for _, s in buffer]
                     try:
-                        hit_scores.update(_score_batch(batch_segs, offset, req.topics, os.environ["GROQ_API_KEY"]))
+                        batch_scores, batch_whys = _score_batch(batch_segs, offset, req.topics, os.environ["GROQ_API_KEY"])
+                        hit_scores.update(batch_scores)
+                        hit_whys.update(batch_whys)
                     except Exception as e:
                         print(f"[api] Incremental Groq batch at segment {offset} failed, skipping: {e}")
                     buffer = []
@@ -242,17 +245,25 @@ def _run_pipeline(job_id: str, req: ProcessRequest, local_video_path: str = None
             offset = buffer[0][0]
             batch_segs = [s for _, s in buffer]
             try:
-                hit_scores.update(_score_batch(batch_segs, offset, req.topics, os.environ["GROQ_API_KEY"]))
+                batch_scores, batch_whys = _score_batch(batch_segs, offset, req.topics, os.environ["GROQ_API_KEY"])
+                hit_scores.update(batch_scores)
+                hit_whys.update(batch_whys)
             except Exception as e:
                 print(f"[api] Final Groq batch at segment {offset} failed, skipping: {e}")
 
         job["segments"] = segments
 
         job["stage"] = "detecting"
-        candidates = _merge_segments(segments, hit_scores)
+        # Each candidate now carries its own specific Groq-given reason (via
+        # hit_whys) instead of every single candidate in the job sharing one
+        # identical generic templated string — falls back to that generic string
+        # per-candidate only if Groq didn't give a "why" for its best segment
+        # (e.g. an older response shape, or that batch failed and got skipped).
+        fallback_reason = f"LLM: relevant to {', '.join(req.topics) or 'anything highlight-worthy'}"
+        candidates = _merge_segments(segments, hit_scores, hit_whys=hit_whys)
         for c in candidates:
-            if use_groq:
-                c.reason = f"LLM: relevant to {', '.join(req.topics) or 'anything highlight-worthy'}"
+            if use_groq and c.reason == "keyword match":
+                c.reason = fallback_reason
         job["candidates"] = candidates
         job["highlight_markers"] = [
             {"start": c.start, "end": c.end, "score": c.score, "reason": c.reason} for c in candidates
