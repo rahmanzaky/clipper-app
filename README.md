@@ -187,12 +187,27 @@ source ../venv/bin/activate
 pytest tests/ -v
 ```
 
-42 tests, pure logic only (no network/model calls), runs in well under a second.
-Covers `detector.py`'s merge/scoring/ranking logic, `compliance.py`'s pass/fail rules,
-`captions.py`'s ASS timestamp math and plain-caption building, and `face_crop.py`'s
+67 tests, no network/model calls, runs in well under a second. Covers
+`detector.py`'s merge/scoring/ranking logic, `compliance.py`'s pass/fail rules,
+`captions.py`'s ASS timestamp math and plain-caption building, `face_crop.py`'s
 crop-clamping boundary logic, clustering, and shot-boundary detection (the latter's
 test fixtures are real recorded sample sequences from two calibration videos, not
-invented data — see the module docstring for how the detection approach was chosen).
+invented data — see the module docstring for how the detection approach was chosen),
+and `tests/test_api.py`'s FastAPI-`TestClient`-based coverage of the web API's
+request validation, 404 handling, and endpoint logic (with `make_clip` mocked out
+where an endpoint would otherwise shell out to ffmpeg).
+
+**Real end-to-end smoke test** — the above is all pure-logic/mocked; to actually
+exercise a real job against a running backend (real download, transcription,
+rendering, every edit endpoint), with the backend already running:
+
+```bash
+cd backend
+./scripts/smoke_test.sh
+```
+
+Formalizes the manual curl-based verification this project has relied on every
+session into something you don't have to re-derive from scratch each time.
 
 ## Error handling
 
