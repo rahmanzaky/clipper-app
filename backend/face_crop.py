@@ -8,17 +8,25 @@ entirely and gives the same "find a face, center the crop on it" result for the 
 purposes. Revisit MediaPipe once that upstream/macOS incompatibility is resolved.
 """
 import os
+import threading
 import cv2
 
 _CASCADE_PATH = os.path.join(os.path.dirname(__file__), "models", "haarcascade_frontalface_default.xml")
-_detector = None
+_thread_local = threading.local()
 
 
 def _get_detector():
-    global _detector
-    if _detector is None:
-        _detector = cv2.CascadeClassifier(_CASCADE_PATH)
-    return _detector
+    """One CascadeClassifier per thread, not a single shared global instance.
+    The rendering pipeline runs multiple clips concurrently via a
+    ThreadPoolExecutor (api.py, RENDER_WORKERS), each calling detectMultiScale on
+    whatever this returns — OpenCV's CascadeClassifier isn't documented as safe
+    for concurrent detectMultiScale calls from multiple threads on one shared
+    instance, and constructing a new one from the (small, local) XML file is cheap
+    enough that there's no reason to risk it.
+    """
+    if not hasattr(_thread_local, "detector"):
+        _thread_local.detector = cv2.CascadeClassifier(_CASCADE_PATH)
+    return _thread_local.detector
 
 
 def find_face_center_x(video_path: str, start: float, end: float, sample_count: int = 5,
@@ -184,6 +192,15 @@ def _boundaries_from_presence_samples(samples: list, min_run_samples: int = 3) -
             final_runs[-1][2] = run[2]
         else:
             final_runs.append(run)
+
+    # The backward-absorption loop above can't merge a short run into "the
+    # previous run" when it IS the first run — there's nothing before it. Merge
+    # it forward into the run that follows instead, or it survives as a spurious
+    # boundary right at the start of the clip (the opposite of what run-length
+    # smoothing is for).
+    if len(final_runs) > 1 and (final_runs[0][2] - final_runs[0][1] + 1) < min_run_samples:
+        final_runs[1][1] = final_runs[0][1]
+        final_runs = final_runs[1:]
 
     return [samples[run[1]][0] for run in final_runs[1:]]
 

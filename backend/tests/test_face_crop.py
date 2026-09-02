@@ -133,6 +133,20 @@ def test_boundaries_min_run_samples_is_tunable():
     assert len(boundaries) > 1
 
 
+def test_boundaries_ignore_short_run_at_the_very_start():
+    """A short run has nowhere to be absorbed backward into when it's the FIRST
+    run in the sequence — must instead be absorbed forward into whatever follows,
+    or it survives as a spurious boundary right at the start of the clip (the
+    real bug this fixes: the backward-only absorption logic only ever checked
+    `cleaned` non-empty, which is never true for the very first run).
+    """
+    samples = [
+        (0.0, False), (1.0, False),  # a 2-sample leading blip — shorter than min_run_samples=3
+        (2.0, True), (3.0, True), (4.0, True), (5.0, True), (6.0, True), (7.0, True),
+    ]
+    assert face_crop._boundaries_from_presence_samples(samples) == []
+
+
 # --- compute_crop_segments ---
 
 def test_compute_crop_segments_manual_passthrough():

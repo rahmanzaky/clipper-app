@@ -192,14 +192,31 @@ def test_manual_clip_indices_never_collide_across_calls(client):
 
 
 def test_trim_preserves_manual_crop_override(client):
+    # The clip's existing crop (whether a single position or, as here, a
+    # crop_segments list) must be threaded through on re-render, rescaled to the
+    # new range — not silently dropped/reset to some default.
     clip = _fake_clip(crop_center_frac=0.77, end=10.0)
     _insert_fake_job("job1", clips=[clip])
     with patch.object(api, "make_clip", return_value=_fake_result_meta(crop_center_frac=0.77)) as mock_make:
         res = client.post("/api/clips/job1/0/trim", json={"start": 1.0, "end": 8.0})
     assert res.status_code == 200
-    # The clip's existing crop_center_frac must be threaded through as the
-    # manual override on re-render, not silently dropped/reset.
-    assert mock_make.call_args.kwargs["crop_center_frac"] == 0.77
+    passed_segments = mock_make.call_args.kwargs.get("crop_segments")
+    assert passed_segments is not None
+    assert all(s["crop_center_frac"] == 0.77 for s in passed_segments)
+
+
+def test_trim_falls_back_to_single_crop_when_new_range_shares_no_overlap(client):
+    # An old crop segment covering [0, 10] has zero overlap with a trim to
+    # [50, 55] (e.g. the user picked a totally different part of a much longer
+    # clip that had been trimmed before) — must fall back to a single position
+    # instead of silently producing an empty/invalid crop_segments list.
+    clip = _fake_clip(crop_center_frac=0.3, end=10.0)
+    _insert_fake_job("job1", clips=[clip])
+    with patch.object(api, "make_clip", return_value=_fake_result_meta(crop_center_frac=0.3)) as mock_make:
+        res = client.post("/api/clips/job1/0/trim", json={"start": 50.0, "end": 55.0})
+    assert res.status_code == 200
+    assert mock_make.call_args.kwargs.get("crop_segments") is None
+    assert mock_make.call_args.kwargs.get("crop_center_frac") == 0.3
 
 
 def test_edit_captions_rechecks_hashtag_compliance(client):

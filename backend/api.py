@@ -483,6 +483,32 @@ def _find_clip(job, clip_index):
     return None
 
 
+def _rescale_crop_segments(old_segments, old_clip_start, new_start, new_end):
+    """Re-express existing crop segments (clip-relative to old_clip_start) for a
+    new [new_start, new_end] absolute range — clips/drops segments outside the new
+    range instead of collapsing everything to one position. Without this, trimming
+    a clip that already had a manual multi-segment crop silently threw away that
+    work, applying only crop_segments[0]'s position across the entire new range.
+    Returns None if nothing in old_segments overlaps the new range at all (caller
+    should fall back to a single position in that case).
+    """
+    new_duration = new_end - new_start
+    rescaled = []
+    for seg in old_segments:
+        abs_s = old_clip_start + seg["start"]
+        abs_e = old_clip_start + seg["end"]
+        rel_s = abs_s - new_start
+        rel_e = abs_e - new_start
+        if rel_e <= 0 or rel_s >= new_duration:
+            continue  # entirely outside the new range
+        rel_s = max(0.0, rel_s)
+        rel_e = min(new_duration, rel_e)
+        if rel_e - rel_s < 0.05:
+            continue  # negligible sliver left after clipping
+        rescaled.append({"start": rel_s, "end": rel_e, "crop_center_frac": seg["crop_center_frac"]})
+    return rescaled or None
+
+
 @app.post("/api/clips/{job_id}/{clip_index}/trim")
 def trim_clip(job_id: str, clip_index: int, req: TrimRequest):
     job = JOBS.get(job_id)
@@ -504,25 +530,41 @@ def trim_clip(job_id: str, clip_index: int, req: TrimRequest):
     out_path = os.path.join(OUTPUT_DIR, out_name)
 
     # Trimming to a new range invalidates the old caption lines (different words in
-    # range) but keeps any manual crop override the user had already applied.
-    crop_frac = clip["crop_center_frac"]
-    try:
-        result_meta = make_clip(video_path, req.start, req.end, words, out_path, crop_center_frac=crop_frac)
-    except Exception as e:
-        raise HTTPException(500, f"Re-render failed: {e}")
+    # range). Preserve any manual multi-segment crop by re-expressing it for the
+    # new range rather than collapsing to a single position; only fall back to a
+    # single position if nothing in the old segments overlaps the new range.
+    old_segments = clip.get("crop_segments") or [
+        {"start": 0.0, "end": clip["end"] - clip["start"], "crop_center_frac": clip["crop_center_frac"]}
+    ]
+    rescaled = _rescale_crop_segments(old_segments, clip["start"], req.start, req.end)
 
-    # Check compliance against the actual re-derived caption text, not an empty
-    # string — a required-hashtag rule needs real text to match against, or it
-    # fails unconditionally regardless of what the trimmed range actually contains.
-    joined_text = " ".join(line["text"] for line in result_meta["caption_lines"])
-    result = check_clip(req.start, req.end, joined_text, profile)
-    clip["start"] = req.start
-    clip["end"] = req.end
-    clip["duration"] = req.end - req.start
-    clip["compliance"] = {"passed": result.passed, "issues": result.issues}
-    clip["crop_center_frac"] = result_meta["crop_center_frac"]
-    clip["crop_segments"] = result_meta["crop_segments"]
-    clip["caption_lines"] = result_meta["caption_lines"]
+    # Holds the job's lock for the full read-render-mutate sequence — without it,
+    # two edits landing close together on the same clip (e.g. a slider drag
+    # followed immediately by a caption edit) could run two ffmpeg processes
+    # concurrently against the identical output path, with the in-memory clip
+    # dict ending up a mix of both requests' fields matching neither actual file.
+    with job["lock"]:
+        try:
+            if rescaled:
+                result_meta = make_clip(video_path, req.start, req.end, words, out_path, crop_segments=rescaled)
+            else:
+                result_meta = make_clip(video_path, req.start, req.end, words, out_path,
+                                         crop_center_frac=clip["crop_center_frac"])
+        except Exception as e:
+            raise HTTPException(500, f"Re-render failed: {e}")
+
+        # Check compliance against the actual re-derived caption text, not an empty
+        # string — a required-hashtag rule needs real text to match against, or it
+        # fails unconditionally regardless of what the trimmed range actually contains.
+        joined_text = " ".join(line["text"] for line in result_meta["caption_lines"])
+        result = check_clip(req.start, req.end, joined_text, profile)
+        clip["start"] = req.start
+        clip["end"] = req.end
+        clip["duration"] = req.end - req.start
+        clip["compliance"] = {"passed": result.passed, "issues": result.issues}
+        clip["crop_center_frac"] = result_meta["crop_center_frac"]
+        clip["crop_segments"] = result_meta["crop_segments"]
+        clip["caption_lines"] = result_meta["caption_lines"]
 
     return {
         "index": clip_index,
@@ -554,19 +596,20 @@ def reposition_clip(job_id: str, clip_index: int, req: RepositionRequest):
     out_name = f"{base}_clip{clip_index}.mp4"
     out_path = os.path.join(OUTPUT_DIR, out_name)
 
-    try:
-        # A single-slider reposition means "use one position for the whole clip" —
-        # this intentionally collapses/discards any prior manual segmentation from
-        # the crop-segments editor, which is the expected meaning of this action.
-        result_meta = make_clip(
-            video_path, clip["start"], clip["end"], words, out_path,
-            crop_center_frac=req.crop_center_frac, caption_lines=clip.get("caption_lines"),
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Re-render failed: {e}")
+    with job["lock"]:
+        try:
+            # A single-slider reposition means "use one position for the whole clip" —
+            # this intentionally collapses/discards any prior manual segmentation from
+            # the crop-segments editor, which is the expected meaning of this action.
+            result_meta = make_clip(
+                video_path, clip["start"], clip["end"], words, out_path,
+                crop_center_frac=req.crop_center_frac, caption_lines=clip.get("caption_lines"),
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Re-render failed: {e}")
 
-    clip["crop_center_frac"] = result_meta["crop_center_frac"]
-    clip["crop_segments"] = result_meta["crop_segments"]
+        clip["crop_center_frac"] = result_meta["crop_center_frac"]
+        clip["crop_segments"] = result_meta["crop_segments"]
     return {
         "index": clip_index,
         "crop_center_frac": clip["crop_center_frac"],
@@ -608,16 +651,17 @@ def set_crop_segments(job_id: str, clip_index: int, req: CropSegmentsRequest):
     out_name = f"{base}_clip{clip_index}.mp4"
     out_path = os.path.join(OUTPUT_DIR, out_name)
 
-    try:
-        result_meta = make_clip(
-            video_path, clip["start"], clip["end"], words, out_path,
-            crop_segments=segments, caption_lines=clip.get("caption_lines"),
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Re-render failed: {e}")
+    with job["lock"]:
+        try:
+            result_meta = make_clip(
+                video_path, clip["start"], clip["end"], words, out_path,
+                crop_segments=segments, caption_lines=clip.get("caption_lines"),
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Re-render failed: {e}")
 
-    clip["crop_segments"] = result_meta["crop_segments"]
-    clip["crop_center_frac"] = result_meta["crop_center_frac"]
+        clip["crop_segments"] = result_meta["crop_segments"]
+        clip["crop_center_frac"] = result_meta["crop_center_frac"]
     return {
         "index": clip_index,
         "crop_segments": clip["crop_segments"],
@@ -641,22 +685,23 @@ def edit_captions(job_id: str, clip_index: int, req: CaptionsRequest):
     out_path = os.path.join(OUTPUT_DIR, out_name)
     new_lines = [line.model_dump() for line in req.lines]
 
-    try:
-        result_meta = make_clip(
-            video_path, clip["start"], clip["end"], words, out_path,
-            crop_segments=clip.get("crop_segments"), caption_lines=new_lines,
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Re-render failed: {e}")
+    with job["lock"]:
+        try:
+            result_meta = make_clip(
+                video_path, clip["start"], clip["end"], words, out_path,
+                crop_segments=clip.get("crop_segments"), caption_lines=new_lines,
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Re-render failed: {e}")
 
-    clip["caption_lines"] = result_meta["caption_lines"]
-    # Re-check compliance against the edited text — the required-hashtag rule reads
-    # caption text, so editing it (e.g. typing in the campaign hashtag by hand) can
-    # flip pass/fail. Without this, the badge would silently go stale after an edit.
-    profile = job.get("profile") or CampaignProfile()
-    joined_text = " ".join(line["text"] for line in clip["caption_lines"])
-    result = check_clip(clip["start"], clip["end"], joined_text, profile)
-    clip["compliance"] = {"passed": result.passed, "issues": result.issues}
+        clip["caption_lines"] = result_meta["caption_lines"]
+        # Re-check compliance against the edited text — the required-hashtag rule reads
+        # caption text, so editing it (e.g. typing in the campaign hashtag by hand) can
+        # flip pass/fail. Without this, the badge would silently go stale after an edit.
+        profile = job.get("profile") or CampaignProfile()
+        joined_text = " ".join(line["text"] for line in clip["caption_lines"])
+        result = check_clip(clip["start"], clip["end"], joined_text, profile)
+        clip["compliance"] = {"passed": result.passed, "issues": result.issues}
     return {
         "index": clip_index,
         "caption_lines": clip["caption_lines"],
