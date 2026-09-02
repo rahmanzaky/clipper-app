@@ -9,13 +9,25 @@ const API = "http://127.0.0.1:8000";
 // seconds internally; this only changes what's displayed.
 function formatTime(seconds, decimals = 1) {
   if (seconds == null || Number.isNaN(seconds)) return decimals > 0 ? "0:00.0" : "0:00";
-  const total = Math.max(0, seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
+  // Rounding h/m/s independently from the raw float (the previous approach) lets a
+  // value like 59.96s round its seconds component up to "60.0" while its minutes
+  // component was already floored to 0, producing the invalid "00:60.0" instead of
+  // "01:00.0" (confirmed: formatTime(59.96) produced exactly that). Rounding to an
+  // integer count of the smallest displayed unit FIRST, then deriving h/m/s from
+  // that integer via floor division, makes the carry happen correctly and avoids
+  // float-modulo imprecision entirely.
+  const factor = 10 ** decimals;
+  let units = Math.round(Math.max(0, seconds) * factor);
+  const unitsPerSecond = factor;
+  const unitsPerMinute = unitsPerSecond * 60;
+  const unitsPerHour = unitsPerMinute * 60;
+  const h = Math.floor(units / unitsPerHour);
+  units -= h * unitsPerHour;
+  const m = Math.floor(units / unitsPerMinute);
+  units -= m * unitsPerMinute;
   const secStr = decimals > 0
-    ? s.toFixed(decimals).padStart(3 + decimals, "0")
-    : String(Math.floor(s)).padStart(2, "0");
+    ? (units / unitsPerSecond).toFixed(decimals).padStart(3 + decimals, "0")
+    : String(units).padStart(2, "0");
   const mStr = String(m).padStart(2, "0");
   return h > 0 ? `${h}:${mStr}:${secStr}` : `${mStr}:${secStr}`;
 }
@@ -629,6 +641,7 @@ function CropEditor({ jobId, clip, onApplied }) {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const videoRef = useRef(null);
+  const containerRef = useRef(null);
 
   const seekToSegment = (i) => {
     setActiveIndex(i);
@@ -644,9 +657,15 @@ function CropEditor({ jobId, clip, onApplied }) {
 
   // Number-key shortcuts to jump between segments — the same convention
   // Premiere Pro and DaVinci Resolve use for switching multicam angles.
-  // Ignored while typing in a text field elsewhere on the page.
+  // Ignored while typing in a text field elsewhere on the page, and scoped to
+  // this specific editor instance via the focus check below — with more than
+  // one clip open for editing at once, a plain window-level listener would
+  // fire in every mounted CropEditor simultaneously, silently reseeking a
+  // preview the user isn't even looking at (confirmed as a real bug: two
+  // crop panels open at once both react to the same keypress).
   useEffect(() => {
     const handleKey = (e) => {
+      if (!containerRef.current?.contains(document.activeElement)) return;
       // Range sliders are <input> too — only skip actual text-entry fields, so
       // the shortcut still works right after dragging a segment's pan slider.
       const tag = e.target.tagName;
@@ -740,7 +759,7 @@ function CropEditor({ jobId, clip, onApplied }) {
   const cropLeftFrac = Math.min(Math.max(activeFrac - cropWidthFrac / 2, 0), 1 - cropWidthFrac);
 
   return (
-    <div className="trim-editor">
+    <div className="trim-editor" ref={containerRef}>
       <p className="clip-meta">
         {segments.length > 1
           ? `This clip spans ${segments.length} detected framing(s) — each gets its own crop position below. Preview shows segment ${activeIndex + 1}.`
@@ -1113,6 +1132,11 @@ function App() {
           // Most likely: the backend restarted since this job was created (job
           // state is in-memory only) — reattaching from the URL found nothing
           // to reattach to. Say so plainly instead of polling a dead job forever.
+          // Also clear jobId-dependent UI state (clips, download-all link, etc.)
+          // — otherwise stale clip cards stick around pointing edit/download
+          // actions at a now-null job ID, failing with a confusing generic
+          // error instead of this already-shown one.
+          resetForNewJob();
           setErrorMsg("This job is no longer available (the server may have restarted). Please start a new one.");
           clearInterval(pollRef.current);
           setJobIdAndUrl(null);
@@ -1168,7 +1192,12 @@ function App() {
   };
 
   const handleManualClip = (clip) => {
-    setClips((prev) => [...prev, clip]);
+    // A poll tick can land between the backend appending this clip to job["clips"]
+    // (which happens before the POST response is even sent) and this response
+    // resolving — if that poll's setClips(data.clips) already included it, a plain
+    // append here would duplicate it (same index, two ClipCards, a React
+    // duplicate-key warning). Guard by index instead of assuming this is new.
+    setClips((prev) => (prev.some((c) => c.index === clip.index) ? prev : [...prev, clip]));
   };
 
   const isProcessing = stage && stage !== "done" && stage !== "error";
