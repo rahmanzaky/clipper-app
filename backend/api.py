@@ -92,6 +92,16 @@ class RepositionRequest(BaseModel):
     crop_center_frac: float
 
 
+class CropSegment(BaseModel):
+    start: float
+    end: float
+    crop_center_frac: float
+
+
+class CropSegmentsRequest(BaseModel):
+    segments: list[CropSegment]
+
+
 class CaptionLine(BaseModel):
     text: str
     start: float
@@ -147,6 +157,7 @@ def _render_one(video_path, cand_start, cand_end, words, out_path, profile, inde
         "compliance": {"passed": compliance.passed, "issues": compliance.issues},
         "clip_filename": os.path.basename(out_path),
         "crop_center_frac": result_meta["crop_center_frac"],
+        "crop_segments": result_meta["crop_segments"],
         "caption_lines": result_meta["caption_lines"],
         "_rendered_path": out_path,
     }
@@ -482,6 +493,7 @@ def trim_clip(job_id: str, clip_index: int, req: TrimRequest):
     clip["duration"] = req.end - req.start
     clip["compliance"] = {"passed": result.passed, "issues": result.issues}
     clip["crop_center_frac"] = result_meta["crop_center_frac"]
+    clip["crop_segments"] = result_meta["crop_segments"]
     clip["caption_lines"] = result_meta["caption_lines"]
 
     return {
@@ -492,6 +504,7 @@ def trim_clip(job_id: str, clip_index: int, req: TrimRequest):
         "compliance": {"passed": result.passed, "issues": result.issues},
         "clip_filename": out_name,
         "crop_center_frac": result_meta["crop_center_frac"],
+        "crop_segments": result_meta["crop_segments"],
         "caption_lines": result_meta["caption_lines"],
     }
 
@@ -514,6 +527,9 @@ def reposition_clip(job_id: str, clip_index: int, req: RepositionRequest):
     out_path = os.path.join(OUTPUT_DIR, out_name)
 
     try:
+        # A single-slider reposition means "use one position for the whole clip" —
+        # this intentionally collapses/discards any prior manual segmentation from
+        # the crop-segments editor, which is the expected meaning of this action.
         result_meta = make_clip(
             video_path, clip["start"], clip["end"], words, out_path,
             crop_center_frac=req.crop_center_frac, caption_lines=clip.get("caption_lines"),
@@ -522,7 +538,63 @@ def reposition_clip(job_id: str, clip_index: int, req: RepositionRequest):
         raise HTTPException(500, f"Re-render failed: {e}")
 
     clip["crop_center_frac"] = result_meta["crop_center_frac"]
-    return {"index": clip_index, "crop_center_frac": clip["crop_center_frac"], "clip_filename": out_name}
+    clip["crop_segments"] = result_meta["crop_segments"]
+    return {
+        "index": clip_index,
+        "crop_center_frac": clip["crop_center_frac"],
+        "crop_segments": clip["crop_segments"],
+        "clip_filename": out_name,
+    }
+
+
+@app.post("/api/clips/{job_id}/{clip_index}/crop-segments")
+def set_crop_segments(job_id: str, clip_index: int, req: CropSegmentsRequest):
+    """Apply a manual multi-segment crop (the multicam-style editor) — lets a clip
+    use a different crop position across different sub-ranges, for when a clip spans
+    more than one hard cut in the source video and a single position can't be right
+    throughout.
+    """
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    clip = _find_clip(job, clip_index)
+    if clip is None:
+        raise HTTPException(404, "Clip not found")
+
+    segments = sorted((s.model_dump() for s in req.segments), key=lambda s: s["start"])
+    duration = clip["end"] - clip["start"]
+    if not segments:
+        raise HTTPException(400, "At least one segment is required")
+    if segments[0]["start"] > 0.01 or segments[-1]["end"] < duration - 0.01:
+        raise HTTPException(400, f"Segments must cover the full clip duration (0 to {duration:.2f}s)")
+    for a, b in zip(segments, segments[1:]):
+        if b["start"] - a["end"] > 0.01 or a["end"] - b["start"] > 0.01:
+            raise HTTPException(400, "Segments must be contiguous with no gaps or overlaps")
+    for s in segments:
+        if not (0.0 <= s["crop_center_frac"] <= 1.0):
+            raise HTTPException(400, "crop_center_frac must be between 0.0 and 1.0")
+
+    video_path = job["video_path"]
+    words = job["words"]
+    base = os.path.splitext(os.path.basename(video_path))[0]
+    out_name = f"{base}_clip{clip_index}.mp4"
+    out_path = os.path.join(OUTPUT_DIR, out_name)
+
+    try:
+        result_meta = make_clip(
+            video_path, clip["start"], clip["end"], words, out_path,
+            crop_segments=segments, caption_lines=clip.get("caption_lines"),
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Re-render failed: {e}")
+
+    clip["crop_segments"] = result_meta["crop_segments"]
+    clip["crop_center_frac"] = result_meta["crop_center_frac"]
+    return {
+        "index": clip_index,
+        "crop_segments": clip["crop_segments"],
+        "clip_filename": out_name,
+    }
 
 
 @app.post("/api/clips/{job_id}/{clip_index}/captions")
@@ -544,7 +616,7 @@ def edit_captions(job_id: str, clip_index: int, req: CaptionsRequest):
     try:
         result_meta = make_clip(
             video_path, clip["start"], clip["end"], words, out_path,
-            crop_center_frac=clip.get("crop_center_frac"), caption_lines=new_lines,
+            crop_segments=clip.get("crop_segments"), caption_lines=new_lines,
         )
     except Exception as e:
         raise HTTPException(500, f"Re-render failed: {e}")
@@ -606,6 +678,7 @@ def manual_clip(job_id: str, req: ManualClipRequest):
         "compliance": {"passed": result.passed, "issues": result.issues},
         "clip_filename": out_name,
         "crop_center_frac": result_meta["crop_center_frac"],
+        "crop_segments": result_meta["crop_segments"],
         "caption_lines": result_meta["caption_lines"],
         "manual": True,
     }
@@ -682,3 +755,48 @@ def run_cleanup(max_age_hours: float = DEFAULT_RETENTION_HOURS):
     jobs_removed = _prune_old_jobs(max_age_hours)
     files_removed = _cleanup_orphaned_files(max_age_hours)
     return {"jobs_removed": jobs_removed, "files_removed": files_removed}
+
+
+@app.get("/api/maintenance/stats")
+def maintenance_stats():
+    """Report what's currently stored — job counts by stage, plus file counts and
+    total size on disk. Cleanup on a fresh testing session always reports "0
+    removed" (nothing's old enough yet), which reads as broken with no way to
+    tell it's actually tracking anything — this gives a before/after to compare
+    against instead.
+    """
+    stage_counts = {}
+    for job in JOBS.values():
+        stage_counts[job.get("stage", "unknown")] = stage_counts.get(job.get("stage", "unknown"), 0) + 1
+
+    def _dir_stats(pattern, exclude_dirs=True):
+        count, total_bytes = 0, 0
+        for path in glob.glob(pattern):
+            if exclude_dirs and os.path.isdir(path):
+                continue
+            try:
+                total_bytes += os.path.getsize(path)
+                count += 1
+            except OSError:
+                continue
+        return count, total_bytes
+
+    work_count, work_bytes = _dir_stats(os.path.join(WORK_DIR, "*"))
+    output_count, output_bytes = _dir_stats(os.path.join(OUTPUT_DIR, "*.mp4"))
+    failed_count, failed_bytes = 0, 0
+    for job_dir in glob.glob(os.path.join(FAILED_DIR, "*")):
+        if not os.path.isdir(job_dir):
+            continue
+        for path in glob.glob(os.path.join(job_dir, "*")):
+            try:
+                failed_bytes += os.path.getsize(path)
+                failed_count += 1
+            except OSError:
+                continue
+
+    return {
+        "jobs_by_stage": stage_counts,
+        "source_videos": {"count": work_count, "bytes": work_bytes},
+        "rendered_clips": {"count": output_count, "bytes": output_bytes},
+        "quarantined_failed": {"count": failed_count, "bytes": failed_bytes},
+    }
