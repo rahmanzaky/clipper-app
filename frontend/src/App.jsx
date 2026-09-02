@@ -3,6 +3,23 @@ import "./App.css";
 
 const API = "http://127.0.0.1:8000";
 
+// Formats a position in time as M:SS (or M:SS.s, or H:MM:SS) — raw seconds like
+// "221.7s" are hard to translate to "3:41" in your head, especially for anything
+// more than a minute into a long source video. Sliders still operate in raw
+// seconds internally; this only changes what's displayed.
+function formatTime(seconds, decimals = 1) {
+  if (seconds == null || Number.isNaN(seconds)) return decimals > 0 ? "0:00.0" : "0:00";
+  const total = Math.max(0, seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const secStr = decimals > 0
+    ? s.toFixed(decimals).padStart(3 + decimals, "0")
+    : String(Math.floor(s)).padStart(2, "0");
+  const mStr = String(m).padStart(2, "0");
+  return h > 0 ? `${h}:${mStr}:${secStr}` : `${mStr}:${secStr}`;
+}
+
 function ProcessForm({ onSubmit, onUpload, disabled }) {
   const [mode, setMode] = useState("url"); // "url" | "upload"
   const [url, setUrl] = useState("");
@@ -366,7 +383,7 @@ function VideoTimeline({ jobId, sourceDuration, highlightMarkers, onManualClip }
             <div
               key={i}
               className="marker"
-              title={`${m.reason} (score ${m.score.toFixed(1)})`}
+              title={`${formatTime(m.start)} – ${formatTime(m.end)} · ${m.reason} (score ${m.score.toFixed(1)})`}
               style={{
                 left: `${(m.start / maxBound) * 100}%`,
                 width: `${Math.max(0.5, ((m.end - m.start) / maxBound) * 100)}%`,
@@ -388,7 +405,7 @@ function VideoTimeline({ jobId, sourceDuration, highlightMarkers, onManualClip }
 
       <div className="slider-group">
         <label>
-          Manual clip start: {Number(rangeStart).toFixed(1)}s
+          Manual clip start: {formatTime(rangeStart)}
           <input
             type="range"
             min={0}
@@ -403,7 +420,7 @@ function VideoTimeline({ jobId, sourceDuration, highlightMarkers, onManualClip }
           />
         </label>
         <label>
-          Manual clip end: {Number(rangeEnd).toFixed(1)}s
+          Manual clip end: {formatTime(rangeEnd)}
           <input
             type="range"
             min={0}
@@ -480,7 +497,7 @@ function TrimEditor({ jobId, clip, sourceDuration, onApplied }) {
       />
       <div className="slider-group">
         <label>
-          Start: {Number(start).toFixed(1)}s
+          Start: {formatTime(start)}
           <input
             type="range"
             min={0}
@@ -495,7 +512,7 @@ function TrimEditor({ jobId, clip, sourceDuration, onApplied }) {
           />
         </label>
         <label>
-          End: {Number(end).toFixed(1)}s
+          End: {formatTime(end)}
           <input
             type="range"
             min={0}
@@ -529,10 +546,35 @@ function CropEditor({ jobId, clip, onApplied }) {
   // boundaries, kept visible even after the user starts editing, as a reference
   // point for "here's where the auto shot-cut was detected."
   const [autoBoundaries] = useState(() => initialSegments.slice(0, -1).map((s) => s.end));
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [cropWidthFrac, setCropWidthFrac] = useState(0.3164); // real value set once the source video's actual dimensions load
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const videoRef = useRef(null);
+
+  const seekToSegment = (i) => {
+    setActiveIndex(i);
+    const seg = segments[i];
+    if (videoRef.current) {
+      // Segment times are clip-relative; the preview shows the full source video,
+      // so convert back to an absolute position — the midpoint gives a
+      // representative frame for that segment rather than its very first frame
+      // (which is often still mid-transition right at a cut).
+      videoRef.current.currentTime = clip.start + (seg.start + seg.end) / 2;
+    }
+  };
+
+  const handleLoadedMetadata = (e) => {
+    const { videoWidth, videoHeight } = e.target;
+    if (videoWidth && videoHeight) {
+      const targetWidth = videoHeight * (9 / 16);
+      setCropWidthFrac(Math.min(1, targetWidth / videoWidth));
+    }
+    seekToSegment(activeIndex);
+  };
 
   const updateFrac = (i, frac) => {
+    setActiveIndex(i);
     setSegments((prev) => prev.map((s, idx) => (idx === i ? { ...s, crop_center_frac: frac } : s)));
   };
 
@@ -545,6 +587,10 @@ function CropEditor({ jobId, clip, onApplied }) {
       const second = { ...seg, start: mid };
       return [...prev.slice(0, i), first, second, ...prev.slice(i + 1)];
     });
+    // A new segment was inserted before any index after i — keep the preview
+    // pointed at the same logical segment instead of silently drifting onto
+    // whatever now occupies its old array slot.
+    setActiveIndex((cur) => (cur > i ? cur + 1 : cur));
   };
 
   const mergeWithNext = (i) => {
@@ -553,6 +599,7 @@ function CropEditor({ jobId, clip, onApplied }) {
       const merged = { ...prev[i], end: prev[i + 1].end };
       return [...prev.slice(0, i), merged, ...prev.slice(i + 2)];
     });
+    setActiveIndex((cur) => (cur > i ? cur - 1 : cur));
   };
 
   const moveBoundary = (i, value) => {
@@ -591,66 +638,111 @@ function CropEditor({ jobId, clip, onApplied }) {
     }
   };
 
+  const activeFrac = segments[activeIndex]?.crop_center_frac ?? 0.5;
+  const cropLeftFrac = Math.min(Math.max(activeFrac - cropWidthFrac / 2, 0), 1 - cropWidthFrac);
+
   return (
     <div className="trim-editor">
       <p className="clip-meta">
         {segments.length > 1
-          ? `This clip spans ${segments.length} detected framing(s) — each gets its own crop position below.`
+          ? `This clip spans ${segments.length} detected framing(s) — each gets its own crop position below. Preview shows segment ${activeIndex + 1}.`
           : "One framing detected for this whole clip."}
+      </p>
+
+      <div className="crop-preview-wrap">
+        <video
+          ref={videoRef}
+          src={`${API}/api/video/source/${jobId}`}
+          muted
+          playsInline
+          className="crop-preview-video"
+          onLoadedMetadata={handleLoadedMetadata}
+        />
+        <div className="crop-mask" style={{ left: 0, width: `${cropLeftFrac * 100}%` }} />
+        <div
+          className="crop-mask"
+          style={{ right: 0, left: "auto", width: `${(1 - cropLeftFrac - cropWidthFrac) * 100}%` }}
+        />
+        <div
+          className="crop-window"
+          style={{ left: `${cropLeftFrac * 100}%`, width: `${cropWidthFrac * 100}%` }}
+        />
+      </div>
+      <p className="clip-meta">
+        The clear band shows what stays in the final 9:16 video for segment {activeIndex + 1} — drag its
+        pan slider below and watch this update live.
       </p>
 
       <div className="segment-timeline">
         {segments.map((s, i) => (
           <div
             key={i}
-            className="segment-block"
+            className={"segment-block" + (i === activeIndex ? " segment-block-active" : "")}
             style={{ width: `${((s.end - s.start) / duration) * 100}%` }}
-          />
+            onClick={() => seekToSegment(i)}
+            title={`Segment ${i + 1}: ${formatTime(s.start)} – ${formatTime(s.end)}`}
+          >
+            {i + 1}
+          </div>
         ))}
         {autoBoundaries.map((b, i) => (
           <div key={i} className="segment-tick" style={{ left: `${(b / duration) * 100}%` }} />
         ))}
       </div>
 
-      {segments.map((seg, i) => (
-        <div key={i} className="segment-row">
-          <label>
-            Segment {i + 1}: {seg.start.toFixed(1)}s – {seg.end.toFixed(1)}s — pan{" "}
-            {(seg.crop_center_frac * 100).toFixed(0)}%
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={seg.crop_center_frac}
-              onChange={(e) => updateFrac(i, Number(e.target.value))}
-            />
-          </label>
-          {i < segments.length - 1 && (
+      {segments.map((seg, i) => {
+        const mid = (seg.start + seg.end) / 2;
+        return (
+          <div
+            key={i}
+            className={"segment-row" + (i === activeIndex ? " segment-row-active" : "")}
+          >
             <label>
-              Boundary after this segment: {seg.end.toFixed(1)}s
+              Segment {i + 1}: {formatTime(seg.start)} – {formatTime(seg.end)} — pan{" "}
+              {(seg.crop_center_frac * 100).toFixed(0)}%
               <input
                 type="range"
-                min={seg.start + 0.2}
-                max={segments[i + 1].end - 0.2}
-                step={0.1}
-                value={seg.end}
-                onChange={(e) => moveBoundary(i, e.target.value)}
+                min={0}
+                max={1}
+                step={0.01}
+                value={seg.crop_center_frac}
+                onFocus={() => seekToSegment(i)}
+                onChange={(e) => updateFrac(i, Number(e.target.value))}
               />
             </label>
-          )}
-          <div className="row">
-            <button type="button" onClick={() => splitSegment(i)}>
-              Split this segment
-            </button>
             {i < segments.length - 1 && (
-              <button type="button" onClick={() => mergeWithNext(i)}>
-                Merge with next
-              </button>
+              <label>
+                Boundary after this segment: {formatTime(seg.end)}
+                <input
+                  type="range"
+                  min={seg.start + 0.2}
+                  max={segments[i + 1].end - 0.2}
+                  step={0.1}
+                  value={seg.end}
+                  onChange={(e) => moveBoundary(i, e.target.value)}
+                />
+              </label>
             )}
+            <div className="row">
+              <button type="button" onClick={() => splitSegment(i)}>
+                Split this segment
+              </button>
+              {i < segments.length - 1 && (
+                <button type="button" onClick={() => mergeWithNext(i)}>
+                  Merge with next
+                </button>
+              )}
+            </div>
+            <p className="segment-hint">
+              {seg.end - seg.start < 0.4
+                ? "Too short to split further."
+                : `"Split" divides this at ${formatTime(mid)}, into ${formatTime(seg.start)}–${formatTime(mid)} and ${formatTime(mid)}–${formatTime(seg.end)}.`}
+              {i < segments.length - 1 &&
+                ` "Merge with next" removes the boundary at ${formatTime(seg.end)}, combining this with segment ${i + 2}.`}
+            </p>
           </div>
-        </div>
-      ))}
+        );
+      })}
 
       {err && <p className="error">{err}</p>}
       <button className="primary" onClick={handleApply} disabled={saving}>
@@ -696,7 +788,7 @@ function CaptionEditor({ jobId, clip, onApplied }) {
       {lines.length === 0 && <p className="clip-meta">No caption lines to edit.</p>}
       {lines.map((line, i) => (
         <label key={i}>
-          Line {i + 1} ({line.start.toFixed(1)}s - {line.end.toFixed(1)}s)
+          Line {i + 1} ({formatTime(line.start)} – {formatTime(line.end)})
           <input type="text" value={line.text} onChange={(e) => updateLine(i, e.target.value)} />
         </label>
       ))}
@@ -732,7 +824,7 @@ function ClipCard({ jobId, clip, sourceDuration, onClipUpdated }) {
         </span>
       </div>
       <p className="clip-meta">
-        {clip.start.toFixed(1)}s - {clip.end.toFixed(1)}s ({clip.duration.toFixed(1)}s)
+        {formatTime(clip.start)} – {formatTime(clip.end)} ({clip.duration.toFixed(1)}s)
         {clip.score ? ` · score ${clip.score.toFixed(1)}` : ""}
       </p>
       {clip.reason && <p className="clip-reason">{clip.reason}</p>}
