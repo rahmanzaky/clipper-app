@@ -9,12 +9,14 @@ after the fact (re-running the same face-crop + caption + compliance logic on th
 bounds).
 """
 import glob
+import io
 import json
 import os
 import shutil
 import threading
 import time
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
@@ -22,7 +24,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 from fastapi import FastAPI, HTTPException, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from downloader import download_video
@@ -728,6 +730,36 @@ def get_clip_video(filename: str):
     if not os.path.exists(path):
         raise HTTPException(404, "Clip not found")
     return FileResponse(path, media_type="video/mp4", headers=_NO_CACHE_HEADERS)
+
+
+@app.get("/api/jobs/{job_id}/download-all")
+def download_all_clips(job_id: str):
+    """Zip every currently-visible clip for this job into one download — one at a
+    time gets tedious once a job has more than a couple of candidates.
+    """
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    clips = job.get("clips", [])
+    if not clips:
+        raise HTTPException(400, "No clips available to download yet")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as zf:
+        for clip in clips:
+            path = os.path.join(OUTPUT_DIR, clip.get("clip_filename", ""))
+            if os.path.exists(path):
+                zf.write(path, arcname=os.path.basename(path))
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="clips_{job_id[:8]}.zip"',
+            **_NO_CACHE_HEADERS,
+        },
+    )
 
 
 @app.get("/api/source-duration/{job_id}")
