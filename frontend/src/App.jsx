@@ -344,7 +344,7 @@ function ProgressBar({ stage, downloadPercent, renderProgress }) {
   );
 }
 
-function VideoTimeline({ jobId, sourceDuration, highlightMarkers, onManualClip }) {
+function VideoTimeline({ jobId, sourceDuration, highlightMarkers, detectionMode, onManualClip }) {
   const [rangeStart, setRangeStart] = useState(0);
   const [rangeEnd, setRangeEnd] = useState(Math.min(15, sourceDuration || 15));
   const [creating, setCreating] = useState(false);
@@ -389,7 +389,21 @@ function VideoTimeline({ jobId, sourceDuration, highlightMarkers, onManualClip }
 
   return (
     <div className="card">
-      <h2>Source video</h2>
+      <div className="clip-header">
+        <h2>Source video</h2>
+        {detectionMode && (
+          <span
+            className={"badge " + (detectionMode === "groq" ? "pass" : "fail")}
+            title={
+              detectionMode === "groq"
+                ? "Using Groq's LLM to find topic-relevant segments, including paraphrases without the literal keyword."
+                : "No GROQ_API_KEY set (or it's unavailable) — falling back to plain keyword matching, which misses paraphrased mentions of your topic."
+            }
+          >
+            {detectionMode === "groq" ? "AI DETECTION" : "KEYWORD ONLY"}
+          </span>
+        )}
+      </div>
       <video
         ref={videoRef}
         src={`${API}/api/video/source/${jobId}`}
@@ -948,6 +962,7 @@ function App() {
   const [downloadPercent, setDownloadPercent] = useState(0);
   const [renderProgress, setRenderProgress] = useState(null);
   const [highlightMarkers, setHighlightMarkers] = useState([]);
+  const [detectionMode, setDetectionMode] = useState(null);
   const [clips, setClips] = useState([]);
   const [renderErrors, setRenderErrors] = useState([]);
   const [errorMsg, setErrorMsg] = useState("");
@@ -984,6 +999,7 @@ function App() {
     setDownloadPercent(0);
     setRenderProgress(null);
     setHighlightMarkers([]);
+    setDetectionMode(null);
     videoReadyFetchedRef.current = false;
   };
 
@@ -1050,6 +1066,7 @@ function App() {
         if (typeof data.download_percent === "number") setDownloadPercent(data.download_percent);
         if (data.render_progress) setRenderProgress(data.render_progress);
         if (data.highlight_markers) setHighlightMarkers(data.highlight_markers);
+        if (data.detection_mode) setDetectionMode(data.detection_mode);
         if (data.clips) setClips(data.clips);
 
         // Use a ref, not the videoReady state, as the "already fetched" guard —
@@ -1127,6 +1144,7 @@ function App() {
           jobId={jobId}
           sourceDuration={sourceDuration}
           highlightMarkers={highlightMarkers}
+          detectionMode={detectionMode}
           onManualClip={handleManualClip}
         />
       )}
