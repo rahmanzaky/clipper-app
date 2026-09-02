@@ -487,7 +487,11 @@ def trim_clip(job_id: str, clip_index: int, req: TrimRequest):
     except Exception as e:
         raise HTTPException(500, f"Re-render failed: {e}")
 
-    result = check_clip(req.start, req.end, "", profile)
+    # Check compliance against the actual re-derived caption text, not an empty
+    # string — a required-hashtag rule needs real text to match against, or it
+    # fails unconditionally regardless of what the trimmed range actually contains.
+    joined_text = " ".join(line["text"] for line in result_meta["caption_lines"])
+    result = check_clip(req.start, req.end, joined_text, profile)
     clip["start"] = req.start
     clip["end"] = req.end
     clip["duration"] = req.end - req.start
@@ -666,7 +670,10 @@ def manual_clip(job_id: str, req: ManualClipRequest):
     except Exception as e:
         raise HTTPException(500, f"Render failed: {e}")
 
-    result = check_clip(req.start, req.end, "", profile)
+    # Same fix as trim_clip: check against the real auto-derived caption text, not
+    # an empty string, so a required-hashtag rule has something real to match.
+    joined_text = " ".join(line["text"] for line in result_meta["caption_lines"])
+    result = check_clip(req.start, req.end, joined_text, profile)
     clip = {
         "index": index,
         "start": req.start,
