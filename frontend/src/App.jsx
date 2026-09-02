@@ -885,6 +885,26 @@ function App() {
   const pollRef = useRef(null);
   const videoReadyFetchedRef = useRef(false);
 
+  // Reattach to whatever job was open when the page was last loaded (or
+  // reloaded) — otherwise a refresh always drops back to a blank form even
+  // though the backend may still be happily running (or have finished) the job.
+  useEffect(() => {
+    const existing = new URLSearchParams(window.location.search).get("job");
+    if (existing) {
+      setJobId(existing);
+      setStage("queued");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const setJobIdAndUrl = (id) => {
+    setJobId(id);
+    const url = new URL(window.location.href);
+    if (id) url.searchParams.set("job", id);
+    else url.searchParams.delete("job");
+    window.history.replaceState(null, "", url);
+  };
+
   const resetForNewJob = () => {
     setErrorMsg("");
     setClips([]);
@@ -910,7 +930,7 @@ function App() {
         throw new Error(body.detail || `Request failed (${res.status})`);
       }
       const data = await res.json();
-      setJobId(data.job_id);
+      setJobIdAndUrl(data.job_id);
       setStage("queued");
     } catch (e) {
       setErrorMsg("Failed to submit job: " + e.message);
@@ -932,7 +952,7 @@ function App() {
         throw new Error(body.detail || `Request failed (${res.status})`);
       }
       const data = await res.json();
-      setJobId(data.job_id);
+      setJobIdAndUrl(data.job_id);
       setStage("queued");
     } catch (e) {
       setErrorMsg("Failed to submit job: " + e.message);
@@ -945,6 +965,15 @@ function App() {
     const poll = async () => {
       try {
         const res = await fetch(`${API}/api/jobs/${jobId}`);
+        if (res.status === 404) {
+          // Most likely: the backend restarted since this job was created (job
+          // state is in-memory only) — reattaching from the URL found nothing
+          // to reattach to. Say so plainly instead of polling a dead job forever.
+          setErrorMsg("This job is no longer available (the server may have restarted). Please start a new one.");
+          clearInterval(pollRef.current);
+          setJobIdAndUrl(null);
+          return;
+        }
         if (!res.ok) return;
         const data = await res.json();
         setStage(data.stage);
