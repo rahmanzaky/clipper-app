@@ -943,7 +943,7 @@ function ScoreGauge({ score }) {
   );
 }
 
-function ClipCard({ jobId, clip, sourceDuration, onClipUpdated }) {
+function ClipCard({ jobId, clip, sourceDuration, onClipUpdated, socialStatus, onSocialStatusChange }) {
   const [panel, setPanel] = useState(null); // null | "trim" | "crop" | "captions"
   const [cacheBust, setCacheBust] = useState(0);
   const [justApplied, setJustApplied] = useState(false);
@@ -1021,6 +1021,9 @@ function ClipCard({ jobId, clip, sourceDuration, onClipUpdated }) {
         <button onClick={() => togglePanel("captions")}>
           {panel === "captions" ? "Cancel" : "Edit captions"}
         </button>
+        <button onClick={() => togglePanel("publish")}>
+          {panel === "publish" ? "Cancel" : "Post to..."}
+        </button>
       </div>
 
       {panel === "trim" && (
@@ -1028,6 +1031,183 @@ function ClipCard({ jobId, clip, sourceDuration, onClipUpdated }) {
       )}
       {panel === "crop" && <CropEditor jobId={jobId} clip={clip} onApplied={handleApplied} />}
       {panel === "captions" && <CaptionEditor jobId={jobId} clip={clip} onApplied={handleApplied} />}
+      {panel === "publish" && (
+        <PublishEditor
+          jobId={jobId}
+          clip={clip}
+          socialStatus={socialStatus}
+          onSocialStatusChange={onSocialStatusChange}
+        />
+      )}
+    </div>
+  );
+}
+
+function PublishEditor({ jobId, clip, socialStatus, onSocialStatusChange }) {
+  const [platform, setPlatform] = useState("youtube"); // "youtube" | "tiktok"
+  const [title, setTitle] = useState((clip.text || `Clip ${clip.index + 1}`).slice(0, 90));
+  const [description, setDescription] = useState("");
+  const [tags, setTags] = useState("");
+  const [privacyStatus, setPrivacyStatus] = useState("private"); // YouTube: private/unlisted/public
+  const [tiktokMode, setTiktokMode] = useState("inbox"); // "inbox" | "direct"
+  const [posting, setPosting] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [result, setResult] = useState(null);
+  const [err, setErr] = useState("");
+
+  const connected = platform === "youtube" ? socialStatus.youtube_connected : socialStatus.tiktok_connected;
+
+  const handleConnectTikTok = async () => {
+    setConnecting(true);
+    setErr("");
+    try {
+      const res = await fetchWithTimeout(`${API}/api/social/tiktok/authorize`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `Request failed (${res.status})`);
+      }
+      const data = await res.json();
+      const popup = window.open(data.authorize_url, "_blank", "width=480,height=720");
+      // No server-push channel for "the OAuth callback finished" — a short poll
+      // after the popup closes catches the common case (user approves, popup
+      // auto-navigates to our callback page, then they close the tab) without
+      // needing the user to manually refresh the app.
+      const poll = setInterval(() => {
+        if (popup && popup.closed) {
+          clearInterval(poll);
+          onSocialStatusChange();
+        }
+      }, 1000);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handlePost = async () => {
+    setPosting(true);
+    setErr("");
+    setResult(null);
+    try {
+      const body =
+        platform === "youtube"
+          ? {
+              title,
+              description,
+              tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
+              privacy_status: privacyStatus,
+            }
+          : { title, mode: tiktokMode };
+      // Uploads can genuinely take longer than the default 120s timeout on a
+      // large clip over a slow connection — give this one more room.
+      const res = await fetchWithTimeout(
+        `${API}/api/clips/${jobId}/${clip.index}/publish/${platform}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+        300000
+      );
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.detail || `Request failed (${res.status})`);
+      }
+      setResult(await res.json());
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  return (
+    <div className="trim-editor">
+      <div className="row" style={{ gap: 16 }}>
+        <label>
+          <input
+            type="radio"
+            name={`platform-${clip.index}`}
+            checked={platform === "youtube"}
+            onChange={() => { setPlatform("youtube"); setResult(null); setErr(""); }}
+          />{" "}
+          YouTube
+        </label>
+        <label>
+          <input
+            type="radio"
+            name={`platform-${clip.index}`}
+            checked={platform === "tiktok"}
+            onChange={() => { setPlatform("tiktok"); setResult(null); setErr(""); }}
+          />{" "}
+          TikTok
+        </label>
+      </div>
+
+      {!connected && platform === "youtube" && (
+        <p className="clip-meta">
+          YouTube isn't connected yet. Run <code>python scripts/setup_youtube_auth.py</code> once from a
+          terminal (see README) — it opens your browser for a one-time authorization.
+        </p>
+      )}
+      {!connected && platform === "tiktok" && (
+        <div className="row" style={{ alignItems: "center", gap: 8 }}>
+          <p className="clip-meta" style={{ margin: 0 }}>TikTok isn't connected yet.</p>
+          <button onClick={handleConnectTikTok} disabled={connecting}>
+            {connecting && <span className="spinner" />}
+            Connect TikTok
+          </button>
+        </div>
+      )}
+
+      <label>
+        Title
+        <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={100} />
+      </label>
+
+      {platform === "youtube" && (
+        <>
+          <label>
+            Description
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} />
+          </label>
+          <label>
+            Tags (comma-separated)
+            <input type="text" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="clip, highlights" />
+          </label>
+          <label>
+            Privacy
+            <select value={privacyStatus} onChange={(e) => setPrivacyStatus(e.target.value)}>
+              <option value="private">Private</option>
+              <option value="unlisted">Unlisted</option>
+              <option value="public">Public</option>
+            </select>
+          </label>
+        </>
+      )}
+
+      {platform === "tiktok" && (
+        <label>
+          Post mode
+          <select value={tiktokMode} onChange={(e) => setTiktokMode(e.target.value)}>
+            <option value="inbox">Send to TikTok inbox (you tap Post in the app)</option>
+            <option value="direct">Post directly (requires an audited app)</option>
+          </select>
+        </label>
+      )}
+
+      {err && <p className="error">{err}</p>}
+      {result && platform === "youtube" && (
+        <p className="toast">
+          Uploaded —{" "}
+          <a href={result.url} target="_blank" rel="noreferrer">
+            view on YouTube
+          </a>
+        </p>
+      )}
+      {result && platform === "tiktok" && <p className="toast">Sent to TikTok ({result.status})</p>}
+
+      <button className="primary" onClick={handlePost} disabled={posting || !connected || !title.trim()}>
+        {posting && <span className="spinner" />}
+        {posting ? "Uploading..." : `Post to ${platform === "youtube" ? "YouTube" : "TikTok"}`}
+      </button>
     </div>
   );
 }
@@ -1044,8 +1224,20 @@ function App() {
   const [renderErrors, setRenderErrors] = useState([]);
   const [errorMsg, setErrorMsg] = useState("");
   const [sourceDuration, setSourceDuration] = useState(null);
+  const [socialStatus, setSocialStatus] = useState({ youtube_connected: false, tiktok_connected: false });
   const pollRef = useRef(null);
   const videoReadyFetchedRef = useRef(false);
+
+  const refreshSocialStatus = () => {
+    fetch(`${API}/api/social/status`)
+      .then((r) => r.json())
+      .then(setSocialStatus)
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    refreshSocialStatus();
+  }, []);
 
   // Reattach to whatever job was open when the page was last loaded (or
   // reloaded) — otherwise a refresh always drops back to a blank form even
@@ -1268,6 +1460,8 @@ function App() {
               clip={clip}
               sourceDuration={sourceDuration}
               onClipUpdated={handleClipUpdated}
+              socialStatus={socialStatus}
+              onSocialStatusChange={refreshSocialStatus}
             />
           ))}
         </div>

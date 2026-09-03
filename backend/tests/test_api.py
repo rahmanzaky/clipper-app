@@ -322,3 +322,116 @@ def test_get_clip_video_rejects_path_traversal(client):
 def test_get_clip_video_not_found(client):
     res = client.get("/api/video/clip/does-not-exist.mp4")
     assert res.status_code == 404
+
+
+def test_get_clip_video_sends_attachment_disposition(client):
+    """The frontend's <a download> link only works same-origin — cross-origin
+    (5173 vs 8000), the browser ignores the HTML `download` attribute entirely.
+    Content-Disposition: attachment forces the download regardless of origin,
+    so this header is the actual fix, not an incidental detail.
+    """
+    out_path = os.path.join(str(api.OUTPUT_DIR), "dl_test.mp4")
+    with open(out_path, "wb") as f:
+        f.write(b"fake video bytes")
+    res = client.get("/api/video/clip/dl_test.mp4")
+    assert res.status_code == 200
+    assert "attachment" in res.headers["content-disposition"]
+    assert "dl_test.mp4" in res.headers["content-disposition"]
+
+
+# --- social publishing ---
+
+def test_social_status_reports_disconnected_by_default(client, monkeypatch):
+    monkeypatch.setattr(api.youtube_upload, "TOKEN_PATH", "/nonexistent/youtube_token.json")
+    monkeypatch.setattr(api.tiktok_upload, "TOKEN_PATH", "/nonexistent/tiktok_token.json")
+    res = client.get("/api/social/status")
+    assert res.status_code == 200
+    assert res.json() == {"youtube_connected": False, "tiktok_connected": False}
+
+
+def test_publish_youtube_clip_not_found(client):
+    _insert_fake_job("job1", clips=[])
+    res = client.post("/api/clips/job1/0/publish/youtube", json={"title": "t"})
+    assert res.status_code == 404
+
+
+def test_publish_youtube_not_connected_returns_400(client, monkeypatch):
+    out_path = os.path.join(str(api.OUTPUT_DIR), "clip0.mp4")
+    with open(out_path, "wb") as f:
+        f.write(b"fake video bytes")
+    _insert_fake_job("job1", clips=[_fake_clip(filename="clip0.mp4")])
+
+    def _raise(*a, **kw):
+        raise api.youtube_upload.YouTubeNotConnected("not connected")
+    monkeypatch.setattr(api.youtube_upload, "upload_video", _raise)
+
+    res = client.post("/api/clips/job1/0/publish/youtube", json={"title": "t"})
+    assert res.status_code == 400
+
+
+def test_publish_youtube_success(client, monkeypatch):
+    out_path = os.path.join(str(api.OUTPUT_DIR), "clip0.mp4")
+    with open(out_path, "wb") as f:
+        f.write(b"fake video bytes")
+    _insert_fake_job("job1", clips=[_fake_clip(filename="clip0.mp4")])
+
+    calls = {}
+
+    def _fake_upload(path, title, description, tags, privacy_status):
+        calls["args"] = (path, title, description, tags, privacy_status)
+        return {"video_id": "abc123", "url": "https://youtu.be/abc123"}
+
+    monkeypatch.setattr(api.youtube_upload, "upload_video", _fake_upload)
+
+    res = client.post("/api/clips/job1/0/publish/youtube", json={
+        "title": "My Clip", "description": "desc", "tags": ["a", "b"], "privacy_status": "unlisted",
+    })
+    assert res.status_code == 200
+    assert res.json() == {"video_id": "abc123", "url": "https://youtu.be/abc123"}
+    assert calls["args"][1] == "My Clip"
+    assert calls["args"][4] == "unlisted"
+
+
+def test_publish_tiktok_not_connected_returns_400(client, monkeypatch):
+    out_path = os.path.join(str(api.OUTPUT_DIR), "clip0.mp4")
+    with open(out_path, "wb") as f:
+        f.write(b"fake video bytes")
+    _insert_fake_job("job1", clips=[_fake_clip(filename="clip0.mp4")])
+
+    def _raise(*a, **kw):
+        raise api.tiktok_upload.TikTokNotConnected("not connected")
+    monkeypatch.setattr(api.tiktok_upload, "upload_video", _raise)
+
+    res = client.post("/api/clips/job1/0/publish/tiktok", json={"title": "t"})
+    assert res.status_code == 400
+
+
+def test_publish_tiktok_success(client, monkeypatch):
+    out_path = os.path.join(str(api.OUTPUT_DIR), "clip0.mp4")
+    with open(out_path, "wb") as f:
+        f.write(b"fake video bytes")
+    _insert_fake_job("job1", clips=[_fake_clip(filename="clip0.mp4")])
+
+    monkeypatch.setattr(
+        api.tiktok_upload, "upload_video",
+        lambda path, title, privacy_level, mode: {"publish_id": "pub1", "status": "SEND_TO_USER_INBOX"},
+    )
+
+    res = client.post("/api/clips/job1/0/publish/tiktok", json={"title": "My Clip"})
+    assert res.status_code == 200
+    assert res.json() == {"publish_id": "pub1", "status": "SEND_TO_USER_INBOX"}
+
+
+def test_tiktok_authorize_requires_client_key(client, monkeypatch):
+    monkeypatch.delenv("TIKTOK_CLIENT_KEY", raising=False)
+    res = client.get("/api/social/tiktok/authorize")
+    assert res.status_code == 400
+
+
+def test_tiktok_authorize_returns_url_when_configured(client, monkeypatch):
+    monkeypatch.setenv("TIKTOK_CLIENT_KEY", "fake_key")
+    res = client.get("/api/social/tiktok/authorize")
+    assert res.status_code == 200
+    url = res.json()["authorize_url"]
+    assert "fake_key" in url
+    assert url.startswith("https://www.tiktok.com/v2/auth/authorize/")

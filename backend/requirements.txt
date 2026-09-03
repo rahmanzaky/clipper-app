@@ -13,3 +13,6 @@ python-multipart>=0.0.32
 fastapi>=0.141.1
 uvicorn>=0.52.4
 httpx>=0.28.1  # required directly by fastapi.testclient.TestClient (tests/test_api.py)
+google-auth>=2.40.0
+google-auth-oauthlib>=1.2.2
+google-api-python-client>=2.150.0

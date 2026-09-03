@@ -135,6 +135,46 @@ best bilingual accuracy but the biggest download):
 export WHISPER_MODEL=small   # faster first run, weaker Indonesian accuracy
 ```
 
+### Publishing clips to YouTube / TikTok
+
+Each clip card has a "Post to..." panel to upload directly to your own YouTube or
+TikTok account. Both need a one-time setup before the first use:
+
+**YouTube** — needs a Google Cloud OAuth client, authorized once from a real browser:
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and
+   enable the **YouTube Data API v3**.
+2. Under **OAuth consent screen**, set User Type to External, and add your own Google
+   account under **Test users** (this keeps the app working indefinitely without
+   Google's full verification review — test-user mode has no expiry).
+3. Under **Credentials → Create Credentials → OAuth client ID**, choose **Desktop app**,
+   then download the client JSON and save it as `backend/secrets/client_secret.json`
+   (the `secrets/` directory is gitignored).
+4. Run the one-time authorization:
+   ```bash
+   cd backend && python scripts/setup_youtube_auth.py
+   ```
+   This opens your browser for a one-time consent screen, then saves a refresh token to
+   `backend/secrets/youtube_token.json` — no browser interaction needed after this.
+
+**TikTok** — needs a TikTok developer app, connected once via the in-app "Connect
+TikTok" button:
+
+1. Register an app at [developers.tiktok.com](https://developers.tiktok.com/) → **Manage
+   apps → Create an app**, and add the **Content Posting API** product.
+2. Copy the app's **Client key** and **Client secret** into your `.env`:
+   ```
+   TIKTOK_CLIENT_KEY=your-client-key
+   TIKTOK_CLIENT_SECRET=your-client-secret
+   ```
+3. Click **Connect TikTok** in the app's publish panel — it opens TikTok's consent
+   screen and stores a token in `backend/secrets/tiktok_token.json` on success.
+4. **Important**: a newly-created TikTok app is *unaudited*. In this state, uploads use
+   "inbox" mode — they land in your TikTok inbox as a draft, and you tap Post yourself
+   in the TikTok app. Direct-to-feed posting ("direct" mode in the publish panel)
+   requires TikTok to audit and approve your app for the `video.publish` scope, which
+   needs a live privacy policy URL and can take TikTok days to weeks to review.
+
 ## CLI mode (still available)
 
 The original CLI entry point still works, useful for scripting a single run without
