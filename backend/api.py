@@ -789,7 +789,12 @@ def get_clip_video(filename: str):
     path = os.path.join(OUTPUT_DIR, filename)
     if not os.path.exists(path):
         raise HTTPException(404, "Clip not found")
-    return FileResponse(path, media_type="video/mp4", headers=_NO_CACHE_HEADERS)
+    # filename= makes FileResponse send Content-Disposition: attachment, which forces
+    # a download regardless of origin. The frontend's plain `<a download>` link alone
+    # doesn't work here: the browser only honors the HTML `download` attribute for
+    # same-origin URLs, and the frontend (5173) and this API (8000) are cross-origin
+    # — without this header, clicking the link just navigated to view the video.
+    return FileResponse(path, media_type="video/mp4", headers=_NO_CACHE_HEADERS, filename=filename)
 
 
 @app.get("/api/jobs/{job_id}/download-all")
