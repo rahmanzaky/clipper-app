@@ -25,7 +25,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 from fastapi import FastAPI, HTTPException, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from downloader import download_video
@@ -34,6 +34,8 @@ from detector import _score_batch, _merge_segments, _keyword_hit_score, BATCH_SI
 from clipper import make_clip
 from compliance import CampaignProfile, check_clip
 from profiles import list_profiles, load_profile, save_profile, delete_profile
+import youtube_upload
+import tiktok_upload
 
 WORK_DIR = os.path.join(os.path.dirname(__file__), "..", "work")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "output")
@@ -129,6 +131,19 @@ class SaveProfileRequest(BaseModel):
     min_duration: float = 8.0
     max_duration: float = 60.0
     hashtag: str = ""
+
+
+class PublishYouTubeRequest(BaseModel):
+    title: str
+    description: str = ""
+    tags: list[str] = []
+    privacy_status: str = "private"  # "private" | "unlisted" | "public"
+
+
+class PublishTikTokRequest(BaseModel):
+    title: str
+    privacy_level: str = "SELF_ONLY"
+    mode: str = "inbox"  # "inbox" (default, no audit needed) | "direct" (needs audited scope)
 
 
 def _quarantine_if_failed(job, clip_dict, rendered_path):
@@ -925,3 +940,81 @@ def maintenance_stats():
         "rendered_clips": {"count": output_count, "bytes": output_bytes},
         "quarantined_failed": {"count": failed_count, "bytes": failed_bytes},
     }
+
+
+def _clip_file_path(job_id: str, clip_index: int) -> str:
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    clip = _find_clip(job, clip_index)
+    if clip is None:
+        raise HTTPException(404, "Clip not found")
+    path = os.path.join(OUTPUT_DIR, clip.get("clip_filename", ""))
+    if not os.path.exists(path):
+        raise HTTPException(404, "Clip file not found on disk")
+    return path
+
+
+@app.get("/api/social/status")
+def social_status():
+    """Whether each platform has a usable stored credential — drives whether the
+    frontend shows "Post to..." buttons or a "Connect..." prompt instead.
+    """
+    return {
+        "youtube_connected": youtube_upload.is_connected(),
+        "tiktok_connected": tiktok_upload.is_connected(),
+    }
+
+
+@app.get("/api/social/tiktok/authorize")
+def tiktok_authorize():
+    """Return the URL the frontend should open in a new tab/window to start
+    TikTok's OAuth consent flow. Requires TIKTOK_CLIENT_KEY in .env (from the
+    TikTok developer app's dashboard).
+    """
+    client_key = os.environ.get("TIKTOK_CLIENT_KEY")
+    if not client_key:
+        raise HTTPException(400, "TIKTOK_CLIENT_KEY not set in .env — create a TikTok developer app first.")
+    redirect_uri = os.environ.get("TIKTOK_REDIRECT_URI", "http://localhost:8000/api/social/tiktok/callback")
+    state = uuid.uuid4().hex
+    return {"authorize_url": tiktok_upload.build_authorize_url(client_key, redirect_uri, state)}
+
+
+@app.get("/api/social/tiktok/callback")
+def tiktok_callback(code: str, state: str = ""):
+    """TikTok redirects here after the user approves the app. Exchanges the
+    one-time code for a stored access/refresh token pair, then shows a plain
+    confirmation page (the user closes this tab and returns to the app).
+    """
+    client_key = os.environ.get("TIKTOK_CLIENT_KEY")
+    client_secret = os.environ.get("TIKTOK_CLIENT_SECRET")
+    if not client_key or not client_secret:
+        raise HTTPException(400, "TikTok credentials not configured in .env")
+    redirect_uri = os.environ.get("TIKTOK_REDIRECT_URI", "http://localhost:8000/api/social/tiktok/callback")
+    try:
+        tiktok_upload.exchange_code_for_token(client_key, client_secret, code, redirect_uri)
+    except Exception as e:
+        return HTMLResponse(f"<html><body>TikTok connection failed: {e}</body></html>", status_code=502)
+    return HTMLResponse("<html><body>TikTok connected — you can close this tab.</body></html>")
+
+
+@app.post("/api/clips/{job_id}/{clip_index}/publish/youtube")
+def publish_to_youtube(job_id: str, clip_index: int, req: PublishYouTubeRequest):
+    path = _clip_file_path(job_id, clip_index)
+    try:
+        return youtube_upload.upload_video(path, req.title, req.description, req.tags, req.privacy_status)
+    except youtube_upload.YouTubeNotConnected as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"YouTube upload failed: {e}")
+
+
+@app.post("/api/clips/{job_id}/{clip_index}/publish/tiktok")
+def publish_to_tiktok(job_id: str, clip_index: int, req: PublishTikTokRequest):
+    path = _clip_file_path(job_id, clip_index)
+    try:
+        return tiktok_upload.upload_video(path, req.title, req.privacy_level, req.mode)
+    except tiktok_upload.TikTokNotConnected as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"TikTok upload failed: {e}")
