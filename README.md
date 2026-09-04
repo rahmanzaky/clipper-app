@@ -1,5 +1,7 @@
 # Auto Video Clipper
 
+> Personal hobby project, not a commercial product or service.
+
 Paste a video (YouTube URL, a public Google Drive link, or upload a file directly),
 get compliance-checked vertical clips out. Built for competing in paid clipping
 campaigns (Whop/Evangelist-style — e.g. Lovable Clipping).
