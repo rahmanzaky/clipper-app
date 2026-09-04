@@ -1,7 +1,18 @@
-yt-dlp
-faster-whisper
-ffmpeg-python
-opencv-python-headless
-requests
-python-dotenv
-pytest
+# Minimum-version pins (not exact) — yt-dlp in particular needs to stay
+# updatable to keep working as YouTube changes; exact-pinning it would trade
+# reproducibility for staleness. Versions below are what this project has
+# actually been tested against.
+yt-dlp>=2026.8.19
+faster-whisper>=1.2.1
+ffmpeg-python>=0.2.0
+opencv-python-headless>=5.0.0.93
+requests>=2.34.2
+python-dotenv>=1.2.3
+pytest>=9.1.1
+python-multipart>=0.0.32
+fastapi>=0.141.1
+uvicorn>=0.52.4
+httpx>=0.28.1  # required directly by fastapi.testclient.TestClient (tests/test_api.py)
+google-auth>=2.40.0
+google-auth-oauthlib>=1.2.2
+google-api-python-client>=2.150.0
